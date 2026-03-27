@@ -26,6 +26,20 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         email.endsWith("@mlrit.ac.in") &&
         hostedDomain === "mlrit.ac.in";
     },
+
+    async jwt({ token, profile }) {
+      if (profile?.email) {
+        token.email = profile.email;
+      }
+      return token;
+    },
+
+    async session({ session, token }) {
+      if (session.user) {
+        (session.user as any).email = token.email;
+      }
+      return session;
+    },
   },
   trustHost: true,
 });
