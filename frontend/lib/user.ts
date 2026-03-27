@@ -1,9 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSession } from "next-auth/react";
-
-const API_BASE = "https://bunkmax.onrender.com";
 
 export type AppUser = {
   id: number;
@@ -17,55 +14,35 @@ export type AppUser = {
 };
 
 export function useAppUser() {
-  const { data: session, status } = useSession();
   const [appUser, setAppUser] = useState<AppUser | null>(null);
   const [loadingUser, setLoadingUser] = useState(true);
 
   useEffect(() => {
-    async function syncUser() {
-      if (status === "loading") return;
-
-      const email =
-        session?.user?.email ||
-        (session?.user as any)?.email ||
-        undefined;
-
-      if (!email) {
-        console.log("SESSION DEBUG:", session);
-        setAppUser(null);
-        setLoadingUser(false);
-        return;
-      }
-
+    async function loadUser() {
       try {
         setLoadingUser(true);
 
-        const res = await fetch(`${API_BASE}/auth/google-user`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email,
-            name: session?.user?.name || "Student",
-          }),
+        const res = await fetch("/api/me", {
+          cache: "no-store",
         });
 
         if (!res.ok) {
-          throw new Error("Failed to sync user");
+          setAppUser(null);
+          return;
         }
 
         const data = await res.json();
-        console.log("APP USER DEBUG:", data);
         setAppUser(data);
       } catch (err) {
-        console.error("SYNC USER ERROR:", err);
+        console.error("LOAD USER ERROR:", err);
         setAppUser(null);
       } finally {
         setLoadingUser(false);
       }
     }
 
-    syncUser();
-  }, [session, status]);
+    loadUser();
+  }, []);
 
-  return { appUser, loadingUser, session, status };
+  return { appUser, loadingUser };
 }
