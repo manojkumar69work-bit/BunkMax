@@ -280,7 +280,14 @@ export default function Home() {
   }
 
   if (!appUser) {
-    return <div className="app-shell text-sm text-red-300">User not found.</div>;
+    return (
+      <div className="app-shell text-sm text-red-300">
+        User not found
+        <pre className="mt-4 text-xs text-white/70">
+          {JSON.stringify({ loadingUser, appUser }, null, 2)}
+        </pre>
+      </div>
+    );
   }
 
   return (
