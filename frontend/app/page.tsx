@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import BottomNav from "@/components/BottomNav";
 import {
   getDashboard,
@@ -46,6 +47,7 @@ type Subject = {
 
 export default function Home() {
   const { appUser, loadingUser } = useAppUser();
+  const router = useRouter();
 
   const [data, setData] = useState<DashboardData | null>(null);
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -58,6 +60,12 @@ export default function Home() {
 
   const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
   const [markingKey, setMarkingKey] = useState<string>("");
+
+  useEffect(() => {
+    if (!loadingUser && !appUser) {
+      router.push("/login");
+    }
+  }, [loadingUser, appUser, router]);
 
   useEffect(() => {
     if (!appUser) return;
@@ -280,14 +288,7 @@ export default function Home() {
   }
 
   if (!appUser) {
-    return (
-      <div className="app-shell text-sm text-red-300">
-        User not found
-        <pre className="mt-4 text-xs text-white/70">
-          {JSON.stringify({ loadingUser, appUser }, null, 2)}
-        </pre>
-      </div>
-    );
+    return <div className="app-shell text-sm text-gray-400">Redirecting to login...</div>;
   }
 
   return (
