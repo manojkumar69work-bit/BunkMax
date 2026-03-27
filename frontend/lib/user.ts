@@ -25,7 +25,13 @@ export function useAppUser() {
     async function syncUser() {
       if (status === "loading") return;
 
-      if (!session?.user?.email) {
+      const email =
+        session?.user?.email ||
+        (session?.user as any)?.email ||
+        undefined;
+
+      if (!email) {
+        console.log("SESSION DEBUG:", session);
         setAppUser(null);
         setLoadingUser(false);
         return;
@@ -38,8 +44,8 @@ export function useAppUser() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            email: session.user.email,
-            name: session.user.name || "Student",
+            email,
+            name: session?.user?.name || "Student",
           }),
         });
 
@@ -48,9 +54,10 @@ export function useAppUser() {
         }
 
         const data = await res.json();
+        console.log("APP USER DEBUG:", data);
         setAppUser(data);
       } catch (err) {
-        console.error(err);
+        console.error("SYNC USER ERROR:", err);
         setAppUser(null);
       } finally {
         setLoadingUser(false);
