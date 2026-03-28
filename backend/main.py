@@ -1,9 +1,11 @@
 import math
-import sqlite3
+import os
 import datetime
 from collections import Counter
 from typing import List, Optional
 
+import psycopg2
+import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,104 +20,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = "attendance.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 PERIODS = 6
 
 
 def get_conn():
-    conn = sqlite3.connect(
-        DB_PATH,
-        timeout=30,
-        check_same_thread=False,
-        isolation_level=None,
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set")
+    return psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        sslmode="require",
     )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout = 30000;")
-    return conn
-
-
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE,
-        name TEXT NOT NULL,
-        college TEXT DEFAULT 'MLR Institute of Technology',
-        branch TEXT DEFAULT '',
-        semester TEXT DEFAULT '',
-        section TEXT DEFAULT '',
-        default_target REAL DEFAULT 75
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS subjects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        subject_name TEXT NOT NULL,
-        attended_classes INTEGER DEFAULT 0,
-        total_classes INTEGER DEFAULT 0,
-        required_percentage REAL DEFAULT 75,
-        UNIQUE(user_id, subject_name)
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS timetable (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        day_name TEXT NOT NULL,
-        period_no INTEGER NOT NULL,
-        subject_name TEXT DEFAULT '',
-        UNIQUE(user_id, day_name, period_no)
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS attendance_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        log_date TEXT NOT NULL,
-        period_no INTEGER NOT NULL,
-        subject_name TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('present', 'absent')),
-        UNIQUE(user_id, log_date, period_no)
-    )
-    """)
-
-    conn.commit()
-
-    cur.execute("PRAGMA table_info(users)")
-    columns = [row[1] for row in cur.fetchall()]
-    if "email" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN email TEXT")
-        conn.commit()
-
-    cur.execute("SELECT id FROM users WHERE email = ?", ("demo@mlrit.ac.in",))
-    if cur.fetchone() is None:
-        cur.execute("""
-        INSERT INTO users (email, name, college, branch, semester, section, default_target)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            "demo@mlrit.ac.in",
-            "Manoj",
-            "MLR Institute of Technology",
-            "CSE",
-            "II-II",
-            "A",
-            75,
-        ))
-        conn.commit()
-
-    conn.close()
-
-
-init_db()
 
 
 class UserProfile(BaseModel):
@@ -164,7 +81,7 @@ def calculate_percentage(attended: int, total: int) -> float:
     return round((attended / total) * 100, 2)
 
 
-def average_of_subject_percentages(subjects: list[sqlite3.Row]) -> float:
+def average_of_subject_percentages(subjects: list[dict]) -> float:
     if not subjects:
         return 0.0
     percentages = [
@@ -199,7 +116,7 @@ def risk_label(attended: int, total: int, required_percentage: float) -> str:
     diff = pct - required_percentage
     if diff >= 5:
         return "Safe"
-    elif diff >= 0:
+    if diff >= 0:
         return "Warning"
     return "Danger"
 
@@ -218,28 +135,37 @@ def get_next_class_days(n: int):
 
 def get_subjects_for_user(user_id: int):
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, subject_name, attended_classes, total_classes, required_percentage
-        FROM subjects
-        WHERE user_id = ?
-        ORDER BY subject_name
-    """, (user_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, subject_name, attended_classes, total_classes, required_percentage
+                FROM subjects
+                WHERE user_id = %s
+                ORDER BY subject_name
+                """,
+                (user_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
 
 
 def get_timetable_for_user(user_id: int):
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT day_name, period_no, subject_name
-        FROM timetable
-        WHERE user_id = ?
-    """, (user_id,))
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT day_name, period_no, subject_name
+                FROM timetable
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
 
     data = {day: [""] * PERIODS for day in DAYS}
     for row in rows:
@@ -285,8 +211,7 @@ def simulate_future_absence(subjects, counts: Counter):
         new_pct = calculate_percentage(attended, new_total)
         new_percentages.append(new_pct)
 
-    new_avg = round(sum(new_percentages) / len(new_percentages), 2) if new_percentages else 0.0
-    return new_avg
+    return round(sum(new_percentages) / len(new_percentages), 2) if new_percentages else 0.0
 
 
 @app.get("/")
@@ -296,112 +221,128 @@ def root():
 
 @app.post("/auth/google-user")
 def auth_google_user(payload: AuthUserIn):
-    if not payload.email.endswith("@mlrit.ac.in"):
+    normalized_email = payload.email.strip().lower()
+
+    if not normalized_email.endswith("@mlrit.ac.in"):
         raise HTTPException(status_code=403, detail="Only @mlrit.ac.in accounts are allowed")
 
     conn = get_conn()
-    cur = conn.cursor()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, email, name, college, branch, semester, section, default_target
+                FROM users
+                WHERE email = %s
+                """,
+                (normalized_email,),
+            )
+            row = cur.fetchone()
 
-    cur.execute("""
-        SELECT id, email, name, college, branch, semester, section, default_target
-        FROM users
-        WHERE email = ?
-    """, (payload.email,))
-    row = cur.fetchone()
+            if row:
+                return dict(row)
 
-    if row:
+            cur.execute(
+                """
+                INSERT INTO users (email, name, college, branch, semester, section, default_target)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, email, name, college, branch, semester, section, default_target
+                """,
+                (
+                    normalized_email,
+                    payload.name or "Student",
+                    "MLR Institute of Technology",
+                    "",
+                    "",
+                    "",
+                    75,
+                ),
+            )
+            conn.commit()
+            new_row = cur.fetchone()
+            return dict(new_row)
+    finally:
         conn.close()
-        return dict(row)
-
-    cur.execute("""
-        INSERT INTO users (email, name, college, branch, semester, section, default_target)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        payload.email,
-        payload.name or "Student",
-        "MLR Institute of Technology",
-        "",
-        "",
-        "",
-        75,
-    ))
-    conn.commit()
-
-    cur.execute("""
-        SELECT id, email, name, college, branch, semester, section, default_target
-        FROM users
-        WHERE email = ?
-    """, (payload.email,))
-    new_row = cur.fetchone()
-    conn.close()
-
-    return dict(new_row)
 
 
 @app.get("/users/{user_id}")
 def get_user(user_id: int):
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, email, name, college, branch, semester, section, default_target
-        FROM users
-        WHERE id = ?
-    """, (user_id,))
-    row = cur.fetchone()
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, email, name, college, branch, semester, section, default_target
+                FROM users
+                WHERE id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
 
-    if not row:
-        raise HTTPException(status_code=404, detail="User not found")
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
 
-    return dict(row)
+            return dict(row)
+    finally:
+        conn.close()
 
 
 @app.put("/users/{user_id}")
 def update_user(user_id: int, payload: UserProfile):
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE users
-        SET name = ?, college = ?, branch = ?, semester = ?, section = ?, default_target = ?
-        WHERE id = ?
-    """, (
-        payload.name,
-        payload.college,
-        payload.branch,
-        payload.semester,
-        payload.section,
-        payload.default_target,
-        user_id,
-    ))
-    conn.commit()
-    conn.close()
-    return {"message": "Profile updated"}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET name = %s, college = %s, branch = %s, semester = %s, section = %s, default_target = %s
+                WHERE id = %s
+                """,
+                (
+                    payload.name,
+                    payload.college,
+                    payload.branch,
+                    payload.semester,
+                    payload.section,
+                    payload.default_target,
+                    user_id,
+                ),
+            )
+            conn.commit()
+            return {"message": "Profile updated"}
+    finally:
+        conn.close()
 
 
 @app.get("/users/{user_id}/subjects")
 def list_subjects(user_id: int):
     rows = get_subjects_for_user(user_id)
     result = []
+
     for row in rows:
-        result.append({
-            "id": row["id"],
-            "subject_name": row["subject_name"],
-            "attended_classes": row["attended_classes"],
-            "total_classes": row["total_classes"],
-            "required_percentage": row["required_percentage"],
-            "attendance_percentage": calculate_percentage(
-                row["attended_classes"], row["total_classes"]
-            ),
-            "safe_bunks": safe_bunks(
-                row["attended_classes"], row["total_classes"], row["required_percentage"]
-            ),
-            "need_to_recover": classes_needed(
-                row["attended_classes"], row["total_classes"], row["required_percentage"]
-            ),
-            "status": risk_label(
-                row["attended_classes"], row["total_classes"], row["required_percentage"]
-            ),
-        })
+        result.append(
+            {
+                "id": row["id"],
+                "subject_name": row["subject_name"],
+                "attended_classes": row["attended_classes"],
+                "total_classes": row["total_classes"],
+                "required_percentage": row["required_percentage"],
+                "attendance_percentage": calculate_percentage(
+                    row["attended_classes"], row["total_classes"]
+                ),
+                "safe_bunks": safe_bunks(
+                    row["attended_classes"], row["total_classes"], row["required_percentage"]
+                ),
+                "need_to_recover": classes_needed(
+                    row["attended_classes"], row["total_classes"], row["required_percentage"]
+                ),
+                "status": risk_label(
+                    row["attended_classes"], row["total_classes"], row["required_percentage"]
+                ),
+            }
+        )
+
     return result
 
 
@@ -411,38 +352,48 @@ def save_subject(user_id: int, payload: SubjectIn):
         raise HTTPException(status_code=400, detail="Present cannot be greater than total")
 
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO subjects (user_id, subject_name, attended_classes, total_classes, required_percentage)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(user_id, subject_name)
-        DO UPDATE SET
-            attended_classes = excluded.attended_classes,
-            total_classes = excluded.total_classes,
-            required_percentage = excluded.required_percentage
-    """, (
-        user_id,
-        payload.subject_name,
-        payload.attended_classes,
-        payload.total_classes,
-        payload.required_percentage,
-    ))
-    conn.commit()
-    conn.close()
-    return {"message": "Subject saved"}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO subjects (user_id, subject_name, attended_classes, total_classes, required_percentage)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, subject_name)
+                DO UPDATE SET
+                    attended_classes = EXCLUDED.attended_classes,
+                    total_classes = EXCLUDED.total_classes,
+                    required_percentage = EXCLUDED.required_percentage
+                """,
+                (
+                    user_id,
+                    payload.subject_name.strip(),
+                    payload.attended_classes,
+                    payload.total_classes,
+                    payload.required_percentage,
+                ),
+            )
+            conn.commit()
+            return {"message": "Subject saved"}
+    finally:
+        conn.close()
 
 
 @app.delete("/users/{user_id}/subjects/{subject_name}")
 def delete_subject(user_id: int, subject_name: str):
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        DELETE FROM subjects
-        WHERE user_id = ? AND subject_name = ?
-    """, (user_id, subject_name))
-    conn.commit()
-    conn.close()
-    return {"message": "Subject deleted"}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM subjects
+                WHERE user_id = %s AND subject_name = %s
+                """,
+                (user_id, subject_name),
+            )
+            conn.commit()
+            return {"message": "Subject deleted"}
+    finally:
+        conn.close()
 
 
 @app.get("/users/{user_id}/timetable")
@@ -453,24 +404,27 @@ def get_timetable(user_id: int):
 @app.post("/users/{user_id}/timetable")
 def save_timetable(user_id: int, entries: List[TimetableEntry]):
     conn = get_conn()
-    cur = conn.cursor()
-
-    for entry in entries:
-        cur.execute("""
-            INSERT INTO timetable (user_id, day_name, period_no, subject_name)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, day_name, period_no)
-            DO UPDATE SET subject_name = excluded.subject_name
-        """, (
-            user_id,
-            entry.day_name,
-            entry.period_no,
-            entry.subject_name,
-        ))
-
-    conn.commit()
-    conn.close()
-    return {"message": "Timetable saved"}
+    try:
+        with conn.cursor() as cur:
+            for entry in entries:
+                cur.execute(
+                    """
+                    INSERT INTO timetable (user_id, day_name, period_no, subject_name)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (user_id, day_name, period_no)
+                    DO UPDATE SET subject_name = EXCLUDED.subject_name
+                    """,
+                    (
+                        user_id,
+                        entry.day_name,
+                        entry.period_no,
+                        entry.subject_name,
+                    ),
+                )
+            conn.commit()
+            return {"message": "Timetable saved"}
+    finally:
+        conn.close()
 
 
 @app.get("/users/{user_id}/dashboard")
@@ -484,25 +438,32 @@ def dashboard(user_id: int):
     overall_percentage = round((total_present / total_classes) * 100, 2) if total_classes > 0 else 0.0
 
     today_name = datetime.date.today().strftime("%A")
-    today_date = str(datetime.date.today())
+    today_date = datetime.date.today()
 
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT period_no, status
-        FROM attendance_logs
-        WHERE user_id = ? AND log_date = ?
-    """, (user_id, today_date))
-    logs = {row["period_no"]: row["status"] for row in cur.fetchall()}
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT period_no, status
+                FROM attendance_logs
+                WHERE user_id = %s AND log_date = %s
+                """,
+                (user_id, today_date),
+            )
+            logs = {row["period_no"]: row["status"] for row in cur.fetchall()}
+    finally:
+        conn.close()
 
     today_classes = []
     for i, sub in enumerate(timetable.get(today_name, [""] * PERIODS), start=1):
-        today_classes.append({
-            "period_no": i,
-            "subject_name": sub or "",
-            "marked_status": logs.get(i)
-        })
+        today_classes.append(
+            {
+                "period_no": i,
+                "subject_name": sub or "",
+                "marked_status": logs.get(i),
+            }
+        )
 
     return {
         "current_avg": current_avg,
@@ -518,97 +479,104 @@ def mark_attendance(user_id: int, payload: AttendanceMarkIn):
     if payload.status not in ["present", "absent"]:
         raise HTTPException(status_code=400, detail="Invalid status")
 
-    today = str(datetime.date.today())
+    today = datetime.date.today()
 
     conn = get_conn()
     try:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT attended_classes, total_classes
+                FROM subjects
+                WHERE user_id = %s AND subject_name = %s
+                """,
+                (user_id, payload.subject_name),
+            )
+            subject = cur.fetchone()
 
-        cur.execute("""
-            SELECT attended_classes, total_classes
-            FROM subjects
-            WHERE user_id = ? AND subject_name = ?
-        """, (user_id, payload.subject_name))
-        subject = cur.fetchone()
+            if not subject:
+                raise HTTPException(status_code=404, detail="Subject not found")
 
-        if not subject:
-            raise HTTPException(status_code=404, detail="Subject not found")
+            cur.execute(
+                """
+                SELECT id, status
+                FROM attendance_logs
+                WHERE user_id = %s AND log_date = %s AND period_no = %s
+                """,
+                (user_id, today, payload.period_no),
+            )
+            existing = cur.fetchone()
 
-        cur.execute("""
-            SELECT id, status
-            FROM attendance_logs
-            WHERE user_id = ? AND log_date = ? AND period_no = ?
-        """, (user_id, today, payload.period_no))
-        existing = cur.fetchone()
+            attended = subject["attended_classes"]
+            total = subject["total_classes"]
 
-        attended = subject["attended_classes"]
-        total = subject["total_classes"]
+            if existing:
+                old_status = existing["status"]
 
-        if existing:
-            old_status = existing["status"]
+                if old_status == payload.status:
+                    if old_status == "present":
+                        attended = max(0, attended - 1)
+                        total = max(0, total - 1)
+                    else:
+                        total = max(0, total - 1)
 
-            # same click = unmark
-            if old_status == payload.status:
-                if old_status == "present":
+                    cur.execute(
+                        "DELETE FROM attendance_logs WHERE id = %s",
+                        (existing["id"],),
+                    )
+
+                    cur.execute(
+                        """
+                        UPDATE subjects
+                        SET attended_classes = %s, total_classes = %s
+                        WHERE user_id = %s AND subject_name = %s
+                        """,
+                        (attended, total, user_id, payload.subject_name),
+                    )
+
+                    conn.commit()
+                    return {"message": "Unmarked", "status": None}
+
+                if old_status == "absent" and payload.status == "present":
+                    attended += 1
+                elif old_status == "present" and payload.status == "absent":
                     attended = max(0, attended - 1)
-                    total = max(0, total - 1)
-                else:
-                    total = max(0, total - 1)
 
                 cur.execute(
-                    "DELETE FROM attendance_logs WHERE id = ?",
-                    (existing["id"],)
+                    """
+                    UPDATE attendance_logs
+                    SET status = %s, subject_name = %s
+                    WHERE id = %s
+                    """,
+                    (payload.status, payload.subject_name, existing["id"]),
                 )
 
-                cur.execute("""
-                    UPDATE subjects
-                    SET attended_classes = ?, total_classes = ?
-                    WHERE user_id = ? AND subject_name = ?
-                """, (attended, total, user_id, payload.subject_name))
-
-                conn.commit()
-                return {"message": "Unmarked", "status": None}
-
-            # switch absent -> present
-            if old_status == "absent" and payload.status == "present":
-                attended += 1
-
-            # switch present -> absent
-            elif old_status == "present" and payload.status == "absent":
-                attended = max(0, attended - 1)
-
-            cur.execute("""
-                UPDATE attendance_logs
-                SET status = ?, subject_name = ?
-                WHERE id = ?
-            """, (payload.status, payload.subject_name, existing["id"]))
-
-        else:
-            # first mark
-            if payload.status == "present":
-                attended += 1
-                total += 1
             else:
-                total += 1
+                if payload.status == "present":
+                    attended += 1
+                    total += 1
+                else:
+                    total += 1
 
-            cur.execute("""
-                INSERT INTO attendance_logs (user_id, log_date, period_no, subject_name, status)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, today, payload.period_no, payload.subject_name, payload.status))
+                cur.execute(
+                    """
+                    INSERT INTO attendance_logs (user_id, log_date, period_no, subject_name, status)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (user_id, today, payload.period_no, payload.subject_name, payload.status),
+                )
 
-        cur.execute("""
-            UPDATE subjects
-            SET attended_classes = ?, total_classes = ?
-            WHERE user_id = ? AND subject_name = ?
-        """, (attended, total, user_id, payload.subject_name))
+            cur.execute(
+                """
+                UPDATE subjects
+                SET attended_classes = %s, total_classes = %s
+                WHERE user_id = %s AND subject_name = %s
+                """,
+                (attended, total, user_id, payload.subject_name),
+            )
 
-        conn.commit()
-        return {"message": "Attendance marked", "status": payload.status}
-
-    except sqlite3.OperationalError as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
+            conn.commit()
+            return {"message": "Attendance marked", "status": payload.status}
     finally:
         conn.close()
 
@@ -640,6 +608,7 @@ def quick_action_best_day(user_id: int):
 
     upcoming_days = get_next_class_days(6)
     evaluations = []
+
     for d in upcoming_days:
         counts = absence_counts_from_dates(timetable, [d])
         predicted_avg = simulate_future_absence(subjects, counts)
@@ -664,6 +633,7 @@ def quick_action_worst_day(user_id: int):
 
     upcoming_days = get_next_class_days(6)
     evaluations = []
+
     for d in upcoming_days:
         counts = absence_counts_from_dates(timetable, [d])
         predicted_avg = simulate_future_absence(subjects, counts)
