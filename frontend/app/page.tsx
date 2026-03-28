@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import BottomNav from "@/components/BottomNav";
 import {
   getDashboard,
@@ -47,7 +46,6 @@ type Subject = {
 
 export default function Home() {
   const { appUser, loadingUser } = useAppUser();
-  const router = useRouter();
 
   const [data, setData] = useState<DashboardData | null>(null);
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -60,12 +58,6 @@ export default function Home() {
 
   const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
   const [markingKey, setMarkingKey] = useState<string>("");
-
-  useEffect(() => {
-    if (!loadingUser && !appUser) {
-      router.push("/login");
-    }
-  }, [loadingUser, appUser, router]);
 
   useEffect(() => {
     if (!appUser) return;
@@ -288,7 +280,15 @@ export default function Home() {
   }
 
   if (!appUser) {
-    return <div className="app-shell text-sm text-gray-400">Redirecting to login...</div>;
+    return (
+      <div className="app-shell text-sm text-red-300">
+        Could not load your student data.
+        <div className="mt-3 text-xs text-white/70">
+          Your login session may exist, but your app user could not be loaded.
+          Try refreshing once. If this continues, the user sync step still needs fixing.
+        </div>
+      </div>
+    );
   }
 
   return (
