@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+const API_BASE = "https://bunkmax.onrender.com";
+
 export type AppUser = {
   id: number;
   email?: string;
@@ -13,6 +15,14 @@ export type AppUser = {
   default_target: number;
 };
 
+type AuthSession = {
+  user?: {
+    name?: string | null;
+    email?: string | null;
+  } | null;
+  expires?: string;
+};
+
 export function useAppUser() {
   const [appUser, setAppUser] = useState<AppUser | null>(null);
   const [loadingUser, setLoadingUser] = useState(true);
@@ -22,19 +32,47 @@ export function useAppUser() {
       try {
         setLoadingUser(true);
 
-        const res = await fetch("/api/me", {
+        const sessionRes = await fetch("/api/auth/session", {
+          method: "GET",
           cache: "no-store",
+          credentials: "include",
         });
 
-        if (!res.ok) {
+        if (!sessionRes.ok) {
           setAppUser(null);
           return;
         }
 
-        const data = await res.json();
+        const session: AuthSession = await sessionRes.json();
+        const email = session?.user?.email?.trim().toLowerCase();
+
+        if (!email) {
+          setAppUser(null);
+          return;
+        }
+
+        const backendRes = await fetch(`${API_BASE}/auth/google-user`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            email,
+            name: session?.user?.name || "Student",
+          }),
+        });
+
+        if (!backendRes.ok) {
+          const text = await backendRes.text();
+          console.error("google-user failed:", text);
+          setAppUser(null);
+          return;
+        }
+
+        const data: AppUser = await backendRes.json();
         setAppUser(data);
       } catch (err) {
-        console.error("LOAD USER ERROR:", err);
+        console.error("useAppUser error:", err);
         setAppUser(null);
       } finally {
         setLoadingUser(false);
