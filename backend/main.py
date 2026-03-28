@@ -12,9 +12,14 @@ from pydantic import BaseModel
 
 app = FastAPI(title="BunkMax API")
 
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://bunk-max.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
