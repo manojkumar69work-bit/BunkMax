@@ -280,16 +280,23 @@ export default function Home() {
   }
 
   if (!appUser) {
-    return (
-      <div className="app-shell text-sm text-red-300">
-        Could not load your student data.
-        <div className="mt-3 text-xs text-white/70">
-          Your login session may exist, but your app user could not be loaded.
-          Try refreshing once. If this continues, the user sync step still needs fixing.
-        </div>
+  return (
+    <div className="app-shell">
+      <div className="glass-card p-5 text-center space-y-3">
+        <h1 className="text-xl font-bold">BunkMax</h1>
+        <p className="text-sm text-gray-400">
+          Please continue from the login page.
+        </p>
+        <a
+          href="/login"
+          className="inline-block rounded-xl bg-white px-4 py-2 font-semibold text-black"
+        >
+          Go to Login
+        </a>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   return (
     <div className="app-shell">
