@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
+import Link from "next/link";
+import { autoSyncERP } from "@/lib/erpSync";
 import {
   getDashboard,
   getTomorrow,
@@ -58,6 +60,9 @@ export default function Home() {
 
   const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
   const [markingKey, setMarkingKey] = useState<string>("");
+
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
 
   useEffect(() => {
     if (!appUser) return;
@@ -118,7 +123,22 @@ export default function Home() {
       setBusy("");
     }
   }
+  async function handleSync() {
+  if (!appUser) return;
 
+  setSyncing(true);
+  setSyncMsg("");
+
+  const res = await autoSyncERP(appUser.id);
+
+  if (res.success) {
+    setSyncMsg("✅ ERP Synced Successfully");
+  } else {
+    setSyncMsg("❌ " + res.message);
+  }
+
+  setSyncing(false);
+}
   async function handleMark(
     subjectName: string,
     periodNo: number,
@@ -342,9 +362,46 @@ export default function Home() {
               ? "You are getting close to shortage ⚠️"
               : "Your attendance is low 🚨"}
           </div>
+          <div className="glass-card p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="font-semibold">Sync from ERP</p>
+                <p className="text-xs text-gray-400 mt-1">
+                  Import subjects and attendance into BunkMax
+                </p>
+              </div>
+              <Link
+                href="/import"
+                className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black"
+              >
+                Open
+              </Link>
+            </div>
+          </div>
+          <div className="glass-card p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="font-semibold">Sync from ERP</p>
+                <p className="text-xs text-gray-400">
+                  Automatically import attendance
+                </p>
+              </div>
 
+              <button
+                onClick={handleSync}
+                disabled={syncing}
+                className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black"
+              >
+                {syncing ? "Syncing..." : "Sync ERP"}
+              </button>
+            </div>
+
+            {syncMsg && (
+              <p className="text-sm text-gray-300">{syncMsg}</p>
+            )}
+          </div>
           <div className="section-title">Quick Actions</div>
-
+          
           <QuickCard
             title="Should I skip tomorrow?"
             desc="Instant answer for the next class day."
@@ -530,3 +587,4 @@ function MiniMetric({
     </div>
   );
 }
+  

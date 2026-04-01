@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+
 app = FastAPI(title="BunkMax API")
 
 ALLOWED_ORIGINS = [
@@ -692,3 +693,42 @@ def plan_bunks(user_id: int, payload: PlanRequest):
         "predicted_avg": predicted_avg,
         "drop": round(current_avg - predicted_avg, 2),
     }
+@app.post("/users/{user_id}/import-attendance")
+def import_attendance(user_id: int, payload: ERPImportPayload):
+    if not isinstance(payload.subjects, list) or not isinstance(payload.attendance, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            imported = 0
+
+            for subject in payload.subjects:
+                subject_id = str(subject.get("subjectid", "")).strip()
+                subject_name = str(subject.get("subject_name", "")).strip()
+
+                if not subject_id or not subject_name:
+                    continue
+
+                stats = payload.attendance.get(subject_id, {})
+                total = int(stats.get("totalsessions", 0) or 0)
+                present = int(stats.get("presentSessionsCount", 0) or 0)
+
+                cur.execute(
+                    """
+                    INSERT INTO subjects (user_id, subject_name, attended_classes, total_classes, required_percentage)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id, subject_name)
+                    DO UPDATE SET
+                        attended_classes = EXCLUDED.attended_classes,
+                        total_classes = EXCLUDED.total_classes,
+                        required_percentage = EXCLUDED.required_percentage
+                    """,
+                    (user_id, subject_name, present, total, 75),
+                )
+                imported += 1
+
+            conn.commit()
+            return {"message": "Attendance imported", "subjects_imported": imported}
+    finally:
+        conn.close()

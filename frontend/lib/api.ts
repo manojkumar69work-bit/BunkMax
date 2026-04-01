@@ -201,3 +201,30 @@ export async function markAttendance(
   });
   return handleResponse<{ message: string; status: string | null }>(res);
 }
+export async function importAttendance(
+  payload: {
+    subjects: Array<{
+      subjectid: string;
+      subject_name: string;
+      subject_type?: string;
+      course_code?: string;
+      semesterName?: string;
+    }>;
+    attendance: Record<
+      string,
+      {
+        totalsessions: number;
+        presentSessionsCount: number;
+        percentage?: string | number;
+      }
+    >;
+  },
+  userId: number
+) {
+  const res = await fetch(`${API_BASE}/users/${userId}/import-attendance`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<{ message: string; subjects_imported: number }>(res);
+}
