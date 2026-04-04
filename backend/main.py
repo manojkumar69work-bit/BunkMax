@@ -586,3 +586,101 @@ def auth_google_user(payload: GoogleUserPayload):
 
     finally:
         conn.close()
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+@app.get("/users/{user_id}/tomorrow")
+def get_tomorrow(user_id: int):
+    conn = get_conn()
+    try:
+        india_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        tomorrow = india_now + timedelta(days=1)
+        tomorrow_name = tomorrow.strftime("%A")
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT subject_name, attended_classes, total_classes
+                FROM subjects
+                WHERE user_id = %s
+            """, (user_id,))
+            subjects = cur.fetchall()
+
+            cur.execute("""
+                SELECT subject_name
+                FROM timetable
+                WHERE user_id = %s AND day_name = %s
+            """, (user_id, tomorrow_name))
+            tomorrow_classes = cur.fetchall()
+
+        total = 0
+        attended = 0
+
+        for s in subjects:
+            attended += s["attended_classes"]
+            total += s["total_classes"]
+
+        if tomorrow_classes:
+            total += len(tomorrow_classes)
+
+        new_pct = (attended / total) * 100 if total > 0 else 0
+
+        return {
+            "title": f"Tomorrow ({tomorrow_name})",
+            "current": (attended / total) * 100 if total else 0,
+            "new": new_pct,
+            "drop": 0,
+            "safe": new_pct >= 75
+        }
+
+    finally:
+        conn.close()
+@app.get("/users/{user_id}/best-day")
+def best_day(user_id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT day_name, COUNT(*) as cnt
+                FROM timetable
+                WHERE user_id = %s AND subject_name != ''
+                GROUP BY day_name
+            """, (user_id,))
+            days = cur.fetchall()
+
+        best = min(days, key=lambda x: x["cnt"]) if days else None
+
+        return {
+            "title": f"Best Day: {best['day_name']}" if best else "No data",
+            "current": 0,
+            "new": 0,
+            "drop": 0,
+            "safe": True
+        }
+
+    finally:
+        conn.close()
+@app.get("/users/{user_id}/worst-day")
+def worst_day(user_id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT day_name, COUNT(*) as cnt
+                FROM timetable
+                WHERE user_id = %s AND subject_name != ''
+                GROUP BY day_name
+            """, (user_id,))
+            days = cur.fetchall()
+
+        worst = max(days, key=lambda x: x["cnt"]) if days else None
+
+        return {
+            "title": f"Worst Day: {worst['day_name']}" if worst else "No data",
+            "current": 0,
+            "new": 0,
+            "drop": 0,
+            "safe": False
+        }
+
+    finally:
+        conn.close()
