@@ -17,6 +17,54 @@ type Subject = {
   status: string;
 };
 
+function recalculateSubject(subject: Partial<Subject>): Subject {
+  const id = Number(subject.id ?? 0);
+  const subject_name = String(subject.subject_name ?? "");
+  const attended_classes = Number(subject.attended_classes ?? 0);
+  const total_classes = Number(subject.total_classes ?? 0);
+  const required_percentage = Number(subject.required_percentage ?? 75);
+
+  const attendance_percentage =
+    total_classes > 0
+      ? Number(((attended_classes / total_classes) * 100).toFixed(1))
+      : 0;
+
+  let status = "Danger";
+  if (attendance_percentage >= required_percentage + 5) {
+    status = "Safe";
+  } else if (attendance_percentage >= required_percentage) {
+    status = "Warning";
+  }
+
+  let safe_bunks = 0;
+  if (total_classes > 0 && attendance_percentage >= required_percentage) {
+    const req = required_percentage / 100;
+    safe_bunks = Math.max(
+      0,
+      Math.floor(attended_classes / req - total_classes)
+    );
+  }
+
+  let need_to_recover = 0;
+  if (attendance_percentage < required_percentage) {
+    const req = required_percentage / 100;
+    const x = ((req * total_classes) - attended_classes) / (1 - req);
+    need_to_recover = Math.max(0, Math.ceil(x));
+  }
+
+  return {
+    id,
+    subject_name,
+    attended_classes,
+    total_classes,
+    required_percentage,
+    attendance_percentage,
+    safe_bunks,
+    need_to_recover,
+    status,
+  };
+}
+
 export default function SubjectsPage() {
   const { appUser, loadingUser } = useAppUser();
 
@@ -43,7 +91,9 @@ export default function SubjectsPage() {
       setLoading(true);
       setError("");
       const data = await getSubjects(userId);
-      setSubjects(data);
+      setSubjects(
+        Array.isArray(data) ? data.map((s: any) => recalculateSubject(s)) : []
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load subjects");
     } finally {
@@ -69,7 +119,7 @@ export default function SubjectsPage() {
           subject_name: form.subject_name.trim(),
           attended_classes: Number(form.attended_classes || 0),
           total_classes: Number(form.total_classes || 0),
-          required_percentage: form.required_percentage,
+          required_percentage: Number(form.required_percentage || 75),
         },
         appUser.id
       );
@@ -82,60 +132,25 @@ export default function SubjectsPage() {
       });
 
       setMessage("Subject saved successfully.");
-      loadSubjects(appUser.id);
+      await loadSubjects(appUser.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save subject");
     }
   }
 
-  async function handleDelete(name: string) {
+  async function handleDelete(subjectId: number) {
     if (!appUser) return;
 
     setError("");
     setMessage("");
 
     try {
-      await deleteSubject(name, appUser.id);
-      setSubjects((prev) => prev.filter((s) => s.subject_name !== name));
+      await deleteSubject(subjectId, appUser.id);
+      setSubjects((prev) => prev.filter((s) => s.id !== subjectId));
       setMessage("Subject deleted.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete subject");
     }
-  }
-
-  function recalculateSubject(subject: Subject, attended: number, total: number): Subject {
-    const attendance_percentage =
-      total > 0 ? Number(((attended / total) * 100).toFixed(1)) : 0;
-
-    let status = "Danger";
-    if (attendance_percentage >= subject.required_percentage + 5) {
-      status = "Safe";
-    } else if (attendance_percentage >= subject.required_percentage) {
-      status = "Warning";
-    }
-
-    let safe_bunks = 0;
-    if (total > 0 && attendance_percentage >= subject.required_percentage) {
-      const req = subject.required_percentage / 100;
-      safe_bunks = Math.max(0, Math.floor(attended / req - total));
-    }
-
-    let need_to_recover = 0;
-    if (attendance_percentage < subject.required_percentage) {
-      const req = subject.required_percentage / 100;
-      const x = ((req * total) - attended) / (1 - req);
-      need_to_recover = Math.max(0, Math.ceil(x));
-    }
-
-    return {
-      ...subject,
-      attended_classes: attended,
-      total_classes: total,
-      attendance_percentage,
-      safe_bunks,
-      need_to_recover,
-      status,
-    };
   }
 
   async function updateCounts(
@@ -156,6 +171,7 @@ export default function SubjectsPage() {
       const newTotal = changes.total ?? subject.total_classes;
 
       if (newAttended < 0 || newTotal < 0) {
+        setError("Counts cannot be negative.");
         return;
       }
 
@@ -176,9 +192,17 @@ export default function SubjectsPage() {
 
       setSubjects((prev) =>
         prev.map((s) =>
-          s.id === subject.id ? recalculateSubject(s, newAttended, newTotal) : s
+          s.id === subject.id
+            ? recalculateSubject({
+                ...s,
+                attended_classes: newAttended,
+                total_classes: newTotal,
+              })
+            : s
         )
       );
+
+      setMessage("Subject updated.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update subject");
     } finally {
@@ -258,7 +282,7 @@ export default function SubjectsPage() {
           placeholder="Required % (default 75)"
           value={form.required_percentage}
           onChange={(e) =>
-            setForm({ ...form, required_percentage: Number(e.target.value) })
+            setForm({ ...form, required_percentage: Number(e.target.value) || 75 })
           }
         />
 
@@ -275,8 +299,11 @@ export default function SubjectsPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {subjects.map((subject) => (
-            <div key={subject.id} className="glass-card p-4">
+          {subjects.map((subject, index) => (
+            <div
+              key={`${subject.id ?? "noid"}-${subject.subject_name}-${index}`}
+              className="glass-card p-4"
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="font-semibold text-base">{subject.subject_name}</p>
@@ -287,7 +314,7 @@ export default function SubjectsPage() {
 
                 <button
                   type="button"
-                  onClick={() => handleDelete(subject.subject_name)}
+                  onClick={() => handleDelete(subject.id)}
                   className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-200"
                 >
                   Delete
@@ -321,7 +348,10 @@ export default function SubjectsPage() {
                   disabled={busyId === subject.id}
                   onMinus={() =>
                     updateCounts(subject, {
-                      total: Math.max(subject.attended_classes, subject.total_classes - 1),
+                      total: Math.max(
+                        subject.attended_classes,
+                        subject.total_classes - 1
+                      ),
                     })
                   }
                   onPlus={() =>

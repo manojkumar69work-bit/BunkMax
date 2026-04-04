@@ -8,13 +8,55 @@ import { useAppUser } from "@/lib/user";
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const PERIODS = 6;
 
+type TimetableMap = Record<string, string[]>;
+
+function normalizeTimetable(input: any): TimetableMap {
+  const empty: TimetableMap = Object.fromEntries(
+    DAYS.map((day) => [day, Array(PERIODS).fill("")])
+  ) as TimetableMap;
+
+  if (!input) return empty;
+
+  if (!Array.isArray(input) && typeof input === "object") {
+    const result: TimetableMap = { ...empty };
+
+    for (const day of DAYS) {
+      const arr = Array.isArray(input[day]) ? input[day] : [];
+      result[day] = Array.from({ length: PERIODS }, (_, i) => arr[i] || "");
+    }
+
+    return result;
+  }
+
+  if (Array.isArray(input)) {
+    const result: TimetableMap = { ...empty };
+
+    for (const row of input) {
+      const day = row.day_name;
+      const periodIndex = Number(row.period_no) - 1;
+      const subject = row.subject_name || "";
+
+      if (DAYS.includes(day) && periodIndex >= 0 && periodIndex < PERIODS) {
+        result[day][periodIndex] = subject;
+      }
+    }
+
+    return result;
+  }
+
+  return empty;
+}
+
 export default function SchedulePage() {
   const { appUser, loadingUser } = useAppUser();
 
   const [subjects, setSubjects] = useState<string[]>([]);
-  const [timetable, setTimetable] = useState<Record<string, string[]>>({});
+  const [timetable, setTimetable] = useState<TimetableMap>(
+    normalizeTimetable(null)
+  );
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const [selectedDay, setSelectedDay] = useState("Monday");
 
   useEffect(() => {
@@ -25,12 +67,23 @@ export default function SchedulePage() {
   async function load(userId: number) {
     try {
       setLoading(true);
+      setError("");
+
       const [subjectData, timetableData] = await Promise.all([
         getSubjects(userId),
         getTimetable(userId),
       ]);
-      setSubjects(subjectData.map((s) => s.subject_name));
-      setTimetable(timetableData);
+
+      const subjectNames = Array.isArray(subjectData)
+        ? subjectData
+            .map((s: any) => s?.subject_name)
+            .filter((name: string) => !!name && name.trim() !== "")
+        : [];
+
+      setSubjects(subjectNames);
+      setTimetable(normalizeTimetable(timetableData));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load schedule");
     } finally {
       setLoading(false);
     }
@@ -38,7 +91,10 @@ export default function SchedulePage() {
 
   function updateCell(index: number, value: string) {
     setTimetable((prev) => {
-      const current = prev[selectedDay] ? [...prev[selectedDay]] : Array(PERIODS).fill("");
+      const current = prev[selectedDay]
+        ? [...prev[selectedDay]]
+        : Array(PERIODS).fill("");
+
       current[index] = value;
       return { ...prev, [selectedDay]: current };
     });
@@ -47,16 +103,23 @@ export default function SchedulePage() {
   async function handleSaveDay() {
     if (!appUser) return;
 
-    const arr = timetable[selectedDay] || Array(PERIODS).fill("");
+    try {
+      setError("");
+      setMessage("");
 
-    const entries = arr.map((subject, i) => ({
-      day_name: selectedDay,
-      period_no: i + 1,
-      subject_name: subject || "",
-    }));
+      const arr = timetable[selectedDay] || Array(PERIODS).fill("");
 
-    await saveTimetable(entries, appUser.id);
-    setMessage(`${selectedDay} schedule saved successfully.`);
+      const entries = arr.map((subject, i) => ({
+        day_name: selectedDay,
+        period_no: i + 1,
+        subject_name: subject || "",
+      }));
+
+      await saveTimetable(entries, appUser.id);
+      setMessage(`${selectedDay} schedule saved successfully.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save schedule");
+    }
   }
 
   const currentDayPeriods = timetable[selectedDay] || Array(PERIODS).fill("");
@@ -83,6 +146,12 @@ export default function SchedulePage() {
         </div>
       </div>
 
+      {error && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+          {error}
+        </div>
+      )}
+
       {message && (
         <div className="rounded-xl border border-green-500/30 bg-green-500/10 p-3 text-sm text-green-200">
           {message}
@@ -102,6 +171,7 @@ export default function SchedulePage() {
           <div className="grid grid-cols-2 gap-3">
             {DAYS.map((day) => {
               const active = selectedDay === day;
+
               return (
                 <button
                   key={day}
@@ -127,7 +197,7 @@ export default function SchedulePage() {
 
           <div className="soft-card p-4 space-y-3">
             {Array.from({ length: PERIODS }).map((_, i) => (
-              <div key={i} className="space-y-1">
+              <div key={`${selectedDay}-${i}`} className="space-y-1">
                 <label className="text-xs text-gray-400">Period {i + 1}</label>
                 <select
                   value={currentDayPeriods[i] || ""}
@@ -135,8 +205,8 @@ export default function SchedulePage() {
                   className="input-ui"
                 >
                   <option value="">Select subject</option>
-                  {subjects.map((subject) => (
-                    <option key={subject} value={subject}>
+                  {subjects.map((subject, idx) => (
+                    <option key={`${subject}-${idx}`} value={subject}>
                       {subject}
                     </option>
                   ))}

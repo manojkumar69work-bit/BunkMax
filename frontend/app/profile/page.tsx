@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { signOut } from "next-auth/react";
 import BottomNav from "@/components/BottomNav";
-import { getUser, updateUser } from "@/lib/api";
+import { clearAllUserData, getUser, updateUser } from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 
 export default function ProfilePage() {
@@ -18,6 +18,7 @@ export default function ProfilePage() {
     default_target: 75,
   });
   const [message, setMessage] = useState("");
+  const [clearing, setClearing] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -41,6 +42,28 @@ export default function ProfilePage() {
     if (!appUser) return;
     await updateUser(form, appUser.id);
     setMessage("Profile updated successfully.");
+  }
+
+  async function handleClearAllData() {
+    if (!appUser) return;
+
+    const confirmed = window.confirm(
+      "This will delete all your My Subjects and My Schedule data. Continue?"
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setClearing(true);
+      await clearAllUserData(appUser.id);
+      setMessage("All subjects and schedule data cleared successfully.");
+    } catch (e) {
+      setMessage(
+        e instanceof Error ? e.message : "Failed to clear all data."
+      );
+    } finally {
+      setClearing(false);
+    }
   }
 
   if (loadingUser) {
@@ -118,6 +141,15 @@ export default function ProfilePage() {
         />
 
         <button className="primary-btn">Update Profile</button>
+
+        <button
+          type="button"
+          onClick={handleClearAllData}
+          disabled={clearing}
+          className="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-medium text-red-200 disabled:opacity-50"
+        >
+          {clearing ? "Clearing..." : "Clear All Data"}
+        </button>
 
         <button
           type="button"

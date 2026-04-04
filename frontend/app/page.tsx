@@ -3,12 +3,8 @@
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import Link from "next/link";
-import { autoSyncERP } from "@/lib/erpSync";
 import {
   getDashboard,
-  getTomorrow,
-  getBestDay,
-  getWorstDay,
   getSubjects,
   markAttendance,
 } from "@/lib/api";
@@ -24,14 +20,6 @@ type DashboardData = {
     subject_name: string;
     marked_status?: "present" | "absent" | null;
   }[];
-};
-
-type QuickResult = {
-  title: string;
-  current: number;
-  new: number;
-  drop: number;
-  safe: boolean;
 };
 
 type Subject = {
@@ -53,16 +41,7 @@ export default function Home() {
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
-  const [tomorrow, setTomorrow] = useState<QuickResult | null>(null);
-  const [best, setBest] = useState<QuickResult | null>(null);
-  const [worst, setWorst] = useState<QuickResult | null>(null);
-
-  const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
   const [markingKey, setMarkingKey] = useState<string>("");
-
-  const [syncing, setSyncing] = useState(false);
-  const [syncMsg, setSyncMsg] = useState("");
 
   useEffect(() => {
     if (!appUser) return;
@@ -82,63 +61,12 @@ export default function Home() {
       setData(dashboardRes);
       setSubjects(subjectsRes);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load dashboard");
+      setError(e instanceof Error ? e.message : "Load failed");
     } finally {
       setLoading(false);
     }
   }
 
-  async function runTomorrow() {
-    if (!appUser) return;
-    try {
-      setBusy("tomorrow");
-      setTomorrow(await getTomorrow(appUser.id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function runBest() {
-    if (!appUser) return;
-    try {
-      setBusy("best");
-      setBest(await getBestDay(appUser.id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function runWorst() {
-    if (!appUser) return;
-    try {
-      setBusy("worst");
-      setWorst(await getWorstDay(appUser.id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-    } finally {
-      setBusy("");
-    }
-  }
-  async function handleSync() {
-  if (!appUser) return;
-
-  setSyncing(true);
-  setSyncMsg("");
-
-  const res = await autoSyncERP(appUser.id);
-
-  if (res.success) {
-    setSyncMsg("✅ ERP Synced Successfully");
-  } else {
-    setSyncMsg("❌ " + res.message);
-  }
-
-  setSyncing(false);
-}
   async function handleMark(
     subjectName: string,
     periodNo: number,
@@ -300,23 +228,23 @@ export default function Home() {
   }
 
   if (!appUser) {
-  return (
-    <div className="app-shell">
-      <div className="glass-card p-5 text-center space-y-3">
-        <h1 className="text-xl font-bold">BunkMax</h1>
-        <p className="text-sm text-gray-400">
-          Please continue from the login page.
-        </p>
-        <a
-          href="/login"
-          className="inline-block rounded-xl bg-white px-4 py-2 font-semibold text-black"
-        >
-          Go to Login
-        </a>
+    return (
+      <div className="app-shell">
+        <div className="glass-card p-5 text-center space-y-3">
+          <h1 className="text-xl font-bold">BunkMax</h1>
+          <p className="text-sm text-gray-400">
+            Please continue from the login page.
+          </p>
+          <a
+            href="/login"
+            className="inline-block rounded-xl bg-white px-4 py-2 font-semibold text-black"
+          >
+            Go to Login
+          </a>
+        </div>
       </div>
-    </div>
-  );
-}
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -362,10 +290,11 @@ export default function Home() {
               ? "You are getting close to shortage ⚠️"
               : "Your attendance is low 🚨"}
           </div>
+
           <div className="glass-card p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="font-semibold">Sync from ERP</p>
+                <p className="font-semibold">Import from ERP</p>
                 <p className="text-xs text-gray-400 mt-1">
                   Import subjects and attendance into BunkMax
                 </p>
@@ -378,121 +307,77 @@ export default function Home() {
               </Link>
             </div>
           </div>
-          <div className="glass-card p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-semibold">Sync from ERP</p>
-                <p className="text-xs text-gray-400">
-                  Automatically import attendance
-                </p>
-              </div>
-
-              <button
-                onClick={handleSync}
-                disabled={syncing}
-                className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black"
-              >
-                {syncing ? "Syncing..." : "Sync ERP"}
-              </button>
-            </div>
-
-            {syncMsg && (
-              <p className="text-sm text-gray-300">{syncMsg}</p>
-            )}
-          </div>
-          <div className="section-title">Quick Actions</div>
-          
-          <QuickCard
-            title="Should I skip tomorrow?"
-            desc="Instant answer for the next class day."
-            buttonText={busy === "tomorrow" ? "Checking..." : "Check Tomorrow"}
-            onClick={runTomorrow}
-            result={tomorrow}
-            type="normal"
-          />
-
-          <QuickCard
-            title="Best day to skip"
-            desc="Find the safest upcoming day."
-            buttonText={busy === "best" ? "Finding..." : "Find Best Day"}
-            onClick={runBest}
-            result={best}
-            type="best"
-          />
-
-          <QuickCard
-            title="Avoid skipping on"
-            desc="Know the worst upcoming day to miss."
-            buttonText={busy === "worst" ? "Finding..." : "Find Worst Day"}
-            onClick={runWorst}
-            result={worst}
-            type="worst"
-          />
 
           <div className="section-title">Today&apos;s Classes</div>
 
-          <div className="space-y-3">
-            {data.today_classes.map((item) => {
-              const counts = item.subject_name
-                ? getSubjectCounts(item.subject_name)
-                : null;
+          {data.today_classes.length === 0 ? (
+            <div className="glass-card p-4 text-sm text-gray-400">
+              No classes scheduled for today.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {data.today_classes.map((item) => {
+                const counts = item.subject_name
+                  ? getSubjectCounts(item.subject_name)
+                  : null;
 
-              return (
-                <div key={item.period_no} className="glass-card p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-xs text-gray-400">Period {item.period_no}</p>
-                      <p className="text-lg font-semibold mt-1 truncate">
-                        {item.subject_name || "---"}
-                      </p>
-                    </div>
+                return (
+                  <div key={item.period_no} className="glass-card p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs text-gray-400">Period {item.period_no}</p>
+                        <p className="text-lg font-semibold mt-1 truncate">
+                          {item.subject_name || "---"}
+                        </p>
+                      </div>
 
-                    <div className="flex items-center gap-2">
-                      {counts && (
-                        <div className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-200">
-                          {counts}
-                        </div>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {counts && (
+                          <div className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-200">
+                            {counts}
+                          </div>
+                        )}
 
-                      {item.subject_name && (
-                        <>
-                          <button
-                            type="button"
-                            disabled={markingKey === `${item.period_no}-present`}
-                            onClick={() =>
-                              handleMark(item.subject_name, item.period_no, "present")
-                            }
-                            className={`h-9 w-9 rounded-lg text-sm font-bold ${
-                              item.marked_status === "present"
-                                ? "border border-green-500/30 bg-green-500/25 text-green-200"
-                                : "border border-white/10 bg-white/10 text-white"
-                            } disabled:opacity-50`}
-                          >
-                            P
-                          </button>
+                        {item.subject_name && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={markingKey === `${item.period_no}-present`}
+                              onClick={() =>
+                                handleMark(item.subject_name, item.period_no, "present")
+                              }
+                              className={`h-9 w-9 rounded-lg text-sm font-bold ${
+                                item.marked_status === "present"
+                                  ? "border border-green-500/30 bg-green-500/25 text-green-200"
+                                  : "border border-white/10 bg-white/10 text-white"
+                              } disabled:opacity-50`}
+                            >
+                              P
+                            </button>
 
-                          <button
-                            type="button"
-                            disabled={markingKey === `${item.period_no}-absent`}
-                            onClick={() =>
-                              handleMark(item.subject_name, item.period_no, "absent")
-                            }
-                            className={`h-9 w-9 rounded-lg text-sm font-bold ${
-                              item.marked_status === "absent"
-                                ? "border border-red-500/30 bg-red-500/25 text-red-200"
-                                : "border border-white/10 bg-white/10 text-white"
-                            } disabled:opacity-50`}
-                          >
-                            A
-                          </button>
-                        </>
-                      )}
+                            <button
+                              type="button"
+                              disabled={markingKey === `${item.period_no}-absent`}
+                              onClick={() =>
+                                handleMark(item.subject_name, item.period_no, "absent")
+                              }
+                              className={`h-9 w-9 rounded-lg text-sm font-bold ${
+                                item.marked_status === "absent"
+                                  ? "border border-red-500/30 bg-red-500/25 text-red-200"
+                                  : "border border-white/10 bg-white/10 text-white"
+                              } disabled:opacity-50`}
+                            >
+                              A
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </>
       )}
 
@@ -515,76 +400,3 @@ function MetricCard({
     </div>
   );
 }
-
-function QuickCard({
-  title,
-  desc,
-  buttonText,
-  onClick,
-  result,
-  type,
-}: {
-  title: string;
-  desc: string;
-  buttonText: string;
-  onClick: () => void;
-  result: QuickResult | null;
-  type: "normal" | "best" | "worst";
-}) {
-  return (
-    <div className="soft-card p-4 space-y-3">
-      <div>
-        <p className="font-semibold">{title}</p>
-        <p className="text-xs text-gray-400 mt-1">{desc}</p>
-      </div>
-
-      <button type="button" onClick={onClick} className="secondary-btn">
-        {buttonText}
-      </button>
-
-      {result && (
-        <div className="glass-card p-4 space-y-3">
-          <p className="font-semibold">{result.title}</p>
-
-          <div className="grid grid-cols-3 gap-2">
-            <MiniMetric title="Current" value={`${result.current.toFixed(1)}%`} />
-            <MiniMetric title="New" value={`${result.new.toFixed(1)}%`} />
-            <MiniMetric title="Drop" value={`${result.drop.toFixed(1)}%`} />
-          </div>
-
-          <div
-            className={`rounded-xl border p-2 text-sm ${
-              type === "worst"
-                ? "border-red-500/30 bg-red-500/10 text-red-200"
-                : result.safe
-                ? "border-green-500/30 bg-green-500/10 text-green-200"
-                : "border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
-            }`}
-          >
-            {type === "worst"
-              ? "Avoid skipping on this day ❌"
-              : result.safe
-              ? "Safe to skip ✅"
-              : "Not safe to skip ⚠️"}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MiniMetric({
-  title,
-  value,
-}: {
-  title: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-center">
-      <p className="text-[11px] text-gray-400">{title}</p>
-      <p className="text-sm font-bold mt-1">{value}</p>
-    </div>
-  );
-}
-  

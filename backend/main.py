@@ -1,311 +1,180 @@
-import math
-import os
-import datetime
-from collections import Counter
-from typing import List, Optional
-
-import psycopg2
-import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Any, Optional
+from database import get_conn
 
-
-app = FastAPI(title="BunkMax API")
-
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "https://bunk-max.vercel.app",
-]
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-PERIODS = 6
+
+# ---------------------------
+# MODELS
+# ---------------------------
+
+class ERPImportPayload(BaseModel):
+    subjects: list[dict[str, Any]]
+    attendance: dict[str, Any]
 
 
-def get_conn():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set")
-    return psycopg2.connect(
-        DATABASE_URL,
-        cursor_factory=psycopg2.extras.RealDictCursor,
-        sslmode="require",
-    )
+class MarkAttendance(BaseModel):
+    subject_name: str
+    period_no: int
+    status: str
 
 
-class UserProfile(BaseModel):
+class SubjectPayload(BaseModel):
+    subject_name: str
+    attended_classes: int
+    total_classes: int
+    required_percentage: int = 75
+
+
+class UserPayload(BaseModel):
     name: str
     college: str
     branch: str
     semester: str
     section: str
-    default_target: float
+    default_target: int = 75
 
 
-class AuthUserIn(BaseModel):
-    email: str
-    name: str
-
-
-class SubjectIn(BaseModel):
-    subject_name: str
-    attended_classes: int
-    total_classes: int
-    required_percentage: float
-
-
-class TimetableEntry(BaseModel):
+class ScheduleEntry(BaseModel):
     day_name: str
     period_no: int
     subject_name: str
 
 
-class PlanRequest(BaseModel):
-    mode: str
-    n_days: Optional[int] = 3
-    selected_days: Optional[List[str]] = None
-    weeks: Optional[int] = 1
-
-
-class AttendanceMarkIn(BaseModel):
-    subject_name: str
-    period_no: int
-    status: str  # "present" or "absent"
-
-
-def calculate_percentage(attended: int, total: int) -> float:
-    if total <= 0:
-        return 0.0
-    return round((attended / total) * 100, 2)
-
-
-def average_of_subject_percentages(subjects: list[dict]) -> float:
-    if not subjects:
-        return 0.0
-    percentages = [
-        calculate_percentage(row["attended_classes"], row["total_classes"])
-        for row in subjects
-    ]
-    return round(sum(percentages) / len(percentages), 2)
-
-
-def classes_needed(attended: int, total: int, required_percentage: float) -> int:
-    required = required_percentage / 100
-    if required <= 0 or required >= 1:
-        return 0
-    if total > 0 and calculate_percentage(attended, total) >= required_percentage:
-        return 0
-    x = ((required * total) - attended) / (1 - required)
-    return max(0, math.ceil(x))
-
-
-def safe_bunks(attended: int, total: int, required_percentage: float) -> int:
-    if total == 0:
-        return 0
-    if calculate_percentage(attended, total) < required_percentage:
-        return 0
-    required = required_percentage / 100
-    x = (attended / required) - total
-    return max(0, math.floor(x))
-
-
-def risk_label(attended: int, total: int, required_percentage: float) -> str:
-    pct = calculate_percentage(attended, total)
-    diff = pct - required_percentage
-    if diff >= 5:
-        return "Safe"
-    if diff >= 0:
-        return "Warning"
-    return "Danger"
-
-
-def get_next_class_days(n: int):
-    results = []
-    today = datetime.date.today()
-    offset = 1
-    while len(results) < n:
-        d = today + datetime.timedelta(days=offset)
-        if d.strftime("%A") in DAYS:
-            results.append(d)
-        offset += 1
-    return results
-
-
-def get_subjects_for_user(user_id: int):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, subject_name, attended_classes, total_classes, required_percentage
-                FROM subjects
-                WHERE user_id = %s
-                ORDER BY subject_name
-                """,
-                (user_id,),
-            )
-            return cur.fetchall()
-    finally:
-        conn.close()
-
-
-def get_timetable_for_user(user_id: int):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT day_name, period_no, subject_name
-                FROM timetable
-                WHERE user_id = %s
-                """,
-                (user_id,),
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-
-    data = {day: [""] * PERIODS for day in DAYS}
-    for row in rows:
-        day_name = row["day_name"]
-        period_no = row["period_no"]
-        subject_name = row["subject_name"]
-        if day_name in data and 1 <= period_no <= PERIODS:
-            data[day_name][period_no - 1] = subject_name or ""
-    return data
-
-
-def absence_counts_from_dates(timetable: dict, dates: list[datetime.date]):
-    counts = Counter()
-    for d in dates:
-        day = d.strftime("%A")
-        for sub in timetable.get(day, []):
-            cleaned = (sub or "").strip()
-            if cleaned:
-                counts[cleaned] += 1
-    return counts
-
-
-def absence_counts_from_weekdays(timetable: dict, selected_days: list[str], weeks: int):
-    counts = Counter()
-    for _ in range(weeks):
-        for day in selected_days:
-            for sub in timetable.get(day, []):
-                cleaned = (sub or "").strip()
-                if cleaned:
-                    counts[cleaned] += 1
-    return counts
-
-
-def simulate_future_absence(subjects, counts: Counter):
-    new_percentages = []
-
-    for row in subjects:
-        subject_name = row["subject_name"]
-        attended = row["attended_classes"]
-        total = row["total_classes"]
-        missed = counts.get(subject_name, 0)
-        new_total = total + missed
-        new_pct = calculate_percentage(attended, new_total)
-        new_percentages.append(new_pct)
-
-    return round(sum(new_percentages) / len(new_percentages), 2) if new_percentages else 0.0
-
+# ---------------------------
+# ROOT
+# ---------------------------
 
 @app.get("/")
 def root():
-    return {"message": "BunkMax API running"}
+    return {"message": "BunkMax backend running 🚀"}
 
 
-@app.post("/auth/google-user")
-def auth_google_user(payload: AuthUserIn):
-    normalized_email = payload.email.strip().lower()
+# ---------------------------
+# INIT DB
+# ---------------------------
 
-    if not normalized_email.endswith("@mlrit.ac.in"):
-        raise HTTPException(status_code=403, detail="Only @mlrit.ac.in accounts are allowed")
-
+@app.get("/init-db")
+def init_db():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, email, name, college, branch, semester, section, default_target
-                FROM users
-                WHERE email = %s
-                """,
-                (normalized_email,),
-            )
-            row = cur.fetchone()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT DEFAULT '',
+                    email TEXT DEFAULT '',
+                    college TEXT DEFAULT '',
+                    branch TEXT DEFAULT '',
+                    semester TEXT DEFAULT '',
+                    section TEXT DEFAULT '',
+                    default_target INTEGER DEFAULT 75
+                );
+            """)
 
-            if row:
-                return dict(row)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS subjects (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    subject_name TEXT NOT NULL,
+                    attended_classes INTEGER DEFAULT 0,
+                    total_classes INTEGER DEFAULT 0,
+                    required_percentage INTEGER DEFAULT 75,
+                    UNIQUE(user_id, subject_name)
+                );
+            """)
 
-            cur.execute(
-                """
-                INSERT INTO users (email, name, college, branch, semester, section, default_target)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, email, name, college, branch, semester, section, default_target
-                """,
-                (
-                    normalized_email,
-                    payload.name or "Student",
-                    "MLR Institute of Technology",
-                    "",
-                    "",
-                    "",
-                    75,
-                ),
-            )
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS timetable (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    day_name TEXT NOT NULL,
+                    period_no INTEGER NOT NULL,
+                    subject_name TEXT DEFAULT '',
+                    UNIQUE(user_id, day_name, period_no)
+                );
+            """)
+
             conn.commit()
-            new_row = cur.fetchone()
-            return dict(new_row)
+
+        return {"message": "Database initialized successfully."}
     finally:
         conn.close()
 
+
+# ---------------------------
+# USER
+# ---------------------------
 
 @app.get("/users/{user_id}")
 def get_user(user_id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, email, name, college, branch, semester, section, default_target
+            cur.execute("""
+                SELECT id, name, email, college, branch, semester, section, default_target
                 FROM users
                 WHERE id = %s
-                """,
-                (user_id,),
-            )
-            row = cur.fetchone()
+            """, (user_id,))
+            user = cur.fetchone()
 
-            if not row:
-                raise HTTPException(status_code=404, detail="User not found")
+            if not user:
+                # fallback user so frontend doesn't crash
+                return {
+                    "id": user_id,
+                    "name": "",
+                    "email": "",
+                    "college": "",
+                    "branch": "",
+                    "semester": "",
+                    "section": "",
+                    "default_target": 75,
+                }
 
-            return dict(row)
+            return {
+                "id": user["id"],
+                "name": user["name"],
+                "email": user["email"],
+                "college": user["college"],
+                "branch": user["branch"],
+                "semester": user["semester"],
+                "section": user["section"],
+                "default_target": user["default_target"],
+            }
     finally:
         conn.close()
 
 
 @app.put("/users/{user_id}")
-def update_user(user_id: int, payload: UserProfile):
+def update_user(user_id: int, payload: UserPayload):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE users
-                SET name = %s, college = %s, branch = %s, semester = %s, section = %s, default_target = %s
-                WHERE id = %s
-                """,
-                (
+            cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+            existing = cur.fetchone()
+
+            if existing:
+                cur.execute("""
+                    UPDATE users
+                    SET name = %s,
+                        college = %s,
+                        branch = %s,
+                        semester = %s,
+                        section = %s,
+                        default_target = %s
+                    WHERE id = %s
+                """, (
                     payload.name,
                     payload.college,
                     payload.branch,
@@ -313,390 +182,39 @@ def update_user(user_id: int, payload: UserProfile):
                     payload.section,
                     payload.default_target,
                     user_id,
-                ),
-            )
-            conn.commit()
-            return {"message": "Profile updated"}
-    finally:
-        conn.close()
-
-
-@app.get("/users/{user_id}/subjects")
-def list_subjects(user_id: int):
-    rows = get_subjects_for_user(user_id)
-    result = []
-
-    for row in rows:
-        result.append(
-            {
-                "id": row["id"],
-                "subject_name": row["subject_name"],
-                "attended_classes": row["attended_classes"],
-                "total_classes": row["total_classes"],
-                "required_percentage": row["required_percentage"],
-                "attendance_percentage": calculate_percentage(
-                    row["attended_classes"], row["total_classes"]
-                ),
-                "safe_bunks": safe_bunks(
-                    row["attended_classes"], row["total_classes"], row["required_percentage"]
-                ),
-                "need_to_recover": classes_needed(
-                    row["attended_classes"], row["total_classes"], row["required_percentage"]
-                ),
-                "status": risk_label(
-                    row["attended_classes"], row["total_classes"], row["required_percentage"]
-                ),
-            }
-        )
-
-    return result
-
-
-@app.post("/users/{user_id}/subjects")
-def save_subject(user_id: int, payload: SubjectIn):
-    if payload.attended_classes > payload.total_classes:
-        raise HTTPException(status_code=400, detail="Present cannot be greater than total")
-
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO subjects (user_id, subject_name, attended_classes, total_classes, required_percentage)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (user_id, subject_name)
-                DO UPDATE SET
-                    attended_classes = EXCLUDED.attended_classes,
-                    total_classes = EXCLUDED.total_classes,
-                    required_percentage = EXCLUDED.required_percentage
-                """,
-                (
-                    user_id,
-                    payload.subject_name.strip(),
-                    payload.attended_classes,
-                    payload.total_classes,
-                    payload.required_percentage,
-                ),
-            )
-            conn.commit()
-            return {"message": "Subject saved"}
-    finally:
-        conn.close()
-
-
-@app.delete("/users/{user_id}/subjects/{subject_name}")
-def delete_subject(user_id: int, subject_name: str):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM subjects
-                WHERE user_id = %s AND subject_name = %s
-                """,
-                (user_id, subject_name),
-            )
-            conn.commit()
-            return {"message": "Subject deleted"}
-    finally:
-        conn.close()
-
-
-@app.get("/users/{user_id}/timetable")
-def get_timetable(user_id: int):
-    return get_timetable_for_user(user_id)
-
-
-@app.post("/users/{user_id}/timetable")
-def save_timetable(user_id: int, entries: List[TimetableEntry]):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            for entry in entries:
-                cur.execute(
-                    """
-                    INSERT INTO timetable (user_id, day_name, period_no, subject_name)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (user_id, day_name, period_no)
-                    DO UPDATE SET subject_name = EXCLUDED.subject_name
-                    """,
-                    (
-                        user_id,
-                        entry.day_name,
-                        entry.period_no,
-                        entry.subject_name,
-                    ),
-                )
-            conn.commit()
-            return {"message": "Timetable saved"}
-    finally:
-        conn.close()
-
-
-@app.get("/users/{user_id}/dashboard")
-def dashboard(user_id: int):
-    subjects = get_subjects_for_user(user_id)
-    timetable = get_timetable_for_user(user_id)
-
-    current_avg = average_of_subject_percentages(subjects)
-    total_present = sum(row["attended_classes"] for row in subjects)
-    total_classes = sum(row["total_classes"] for row in subjects)
-    overall_percentage = round((total_present / total_classes) * 100, 2) if total_classes > 0 else 0.0
-
-    today_name = datetime.date.today().strftime("%A")
-    today_date = datetime.date.today()
-
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT period_no, status
-                FROM attendance_logs
-                WHERE user_id = %s AND log_date = %s
-                """,
-                (user_id, today_date),
-            )
-            logs = {row["period_no"]: row["status"] for row in cur.fetchall()}
-    finally:
-        conn.close()
-
-    today_classes = []
-    for i, sub in enumerate(timetable.get(today_name, [""] * PERIODS), start=1):
-        today_classes.append(
-            {
-                "period_no": i,
-                "subject_name": sub or "",
-                "marked_status": logs.get(i),
-            }
-        )
-
-    return {
-        "current_avg": current_avg,
-        "overall_percentage": overall_percentage,
-        "total_present": total_present,
-        "total_absent": total_classes - total_present,
-        "today_classes": today_classes,
-    }
-
-
-@app.post("/users/{user_id}/mark-attendance")
-def mark_attendance(user_id: int, payload: AttendanceMarkIn):
-    if payload.status not in ["present", "absent"]:
-        raise HTTPException(status_code=400, detail="Invalid status")
-
-    today = datetime.date.today()
-
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT attended_classes, total_classes
-                FROM subjects
-                WHERE user_id = %s AND subject_name = %s
-                """,
-                (user_id, payload.subject_name),
-            )
-            subject = cur.fetchone()
-
-            if not subject:
-                raise HTTPException(status_code=404, detail="Subject not found")
-
-            cur.execute(
-                """
-                SELECT id, status
-                FROM attendance_logs
-                WHERE user_id = %s AND log_date = %s AND period_no = %s
-                """,
-                (user_id, today, payload.period_no),
-            )
-            existing = cur.fetchone()
-
-            attended = subject["attended_classes"]
-            total = subject["total_classes"]
-
-            if existing:
-                old_status = existing["status"]
-
-                if old_status == payload.status:
-                    if old_status == "present":
-                        attended = max(0, attended - 1)
-                        total = max(0, total - 1)
-                    else:
-                        total = max(0, total - 1)
-
-                    cur.execute(
-                        "DELETE FROM attendance_logs WHERE id = %s",
-                        (existing["id"],),
-                    )
-
-                    cur.execute(
-                        """
-                        UPDATE subjects
-                        SET attended_classes = %s, total_classes = %s
-                        WHERE user_id = %s AND subject_name = %s
-                        """,
-                        (attended, total, user_id, payload.subject_name),
-                    )
-
-                    conn.commit()
-                    return {"message": "Unmarked", "status": None}
-
-                if old_status == "absent" and payload.status == "present":
-                    attended += 1
-                elif old_status == "present" and payload.status == "absent":
-                    attended = max(0, attended - 1)
-
-                cur.execute(
-                    """
-                    UPDATE attendance_logs
-                    SET status = %s, subject_name = %s
-                    WHERE id = %s
-                    """,
-                    (payload.status, payload.subject_name, existing["id"]),
-                )
-
+                ))
             else:
-                if payload.status == "present":
-                    attended += 1
-                    total += 1
-                else:
-                    total += 1
-
-                cur.execute(
-                    """
-                    INSERT INTO attendance_logs (user_id, log_date, period_no, subject_name, status)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (user_id, today, payload.period_no, payload.subject_name, payload.status),
-                )
-
-            cur.execute(
-                """
-                UPDATE subjects
-                SET attended_classes = %s, total_classes = %s
-                WHERE user_id = %s AND subject_name = %s
-                """,
-                (attended, total, user_id, payload.subject_name),
-            )
+                cur.execute("""
+                    INSERT INTO users (
+                        id, name, email, college, branch, semester, section, default_target
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    user_id,
+                    payload.name,
+                    "",
+                    payload.college,
+                    payload.branch,
+                    payload.semester,
+                    payload.section,
+                    payload.default_target,
+                ))
 
             conn.commit()
-            return {"message": "Attendance marked", "status": payload.status}
+
+        return {"message": "Profile updated successfully."}
     finally:
         conn.close()
 
 
-@app.get("/users/{user_id}/quick-actions/tomorrow")
-def quick_action_tomorrow(user_id: int):
-    subjects = get_subjects_for_user(user_id)
-    timetable = get_timetable_for_user(user_id)
-    current_avg = average_of_subject_percentages(subjects)
+# ---------------------------
+# IMPORT ATTENDANCE
+# ---------------------------
 
-    tomorrow = get_next_class_days(1)[0]
-    counts = absence_counts_from_dates(timetable, [tomorrow])
-    predicted_avg = simulate_future_absence(subjects, counts)
-
-    return {
-        "title": f"{tomorrow.strftime('%A')} ({tomorrow})",
-        "current": current_avg,
-        "new": predicted_avg,
-        "drop": round(current_avg - predicted_avg, 2),
-        "safe": predicted_avg >= 75,
-    }
-
-
-@app.get("/users/{user_id}/quick-actions/best-day")
-def quick_action_best_day(user_id: int):
-    subjects = get_subjects_for_user(user_id)
-    timetable = get_timetable_for_user(user_id)
-    current_avg = average_of_subject_percentages(subjects)
-
-    upcoming_days = get_next_class_days(6)
-    evaluations = []
-
-    for d in upcoming_days:
-        counts = absence_counts_from_dates(timetable, [d])
-        predicted_avg = simulate_future_absence(subjects, counts)
-        evaluations.append((d, predicted_avg, current_avg - predicted_avg))
-
-    best = min(evaluations, key=lambda x: x[2])
-
-    return {
-        "title": f"{best[0].strftime('%A')} ({best[0]})",
-        "current": current_avg,
-        "new": best[1],
-        "drop": round(best[2], 2),
-        "safe": best[1] >= 75,
-    }
-
-
-@app.get("/users/{user_id}/quick-actions/worst-day")
-def quick_action_worst_day(user_id: int):
-    subjects = get_subjects_for_user(user_id)
-    timetable = get_timetable_for_user(user_id)
-    current_avg = average_of_subject_percentages(subjects)
-
-    upcoming_days = get_next_class_days(6)
-    evaluations = []
-
-    for d in upcoming_days:
-        counts = absence_counts_from_dates(timetable, [d])
-        predicted_avg = simulate_future_absence(subjects, counts)
-        evaluations.append((d, predicted_avg, current_avg - predicted_avg))
-
-    worst = max(evaluations, key=lambda x: x[2])
-
-    return {
-        "title": f"{worst[0].strftime('%A')} ({worst[0]})",
-        "current": current_avg,
-        "new": worst[1],
-        "drop": round(worst[2], 2),
-        "safe": worst[1] >= 75,
-    }
-
-
-@app.post("/users/{user_id}/plan")
-def plan_bunks(user_id: int, payload: PlanRequest):
-    subjects = get_subjects_for_user(user_id)
-    timetable = get_timetable_for_user(user_id)
-    current_avg = average_of_subject_percentages(subjects)
-
-    counts = Counter()
-    scenario_label = ""
-
-    if payload.mode == "tomorrow":
-        tomorrow = get_next_class_days(1)[0]
-        counts = absence_counts_from_dates(timetable, [tomorrow])
-        scenario_label = f"If you are absent on {tomorrow.strftime('%A')} ({tomorrow})"
-
-    elif payload.mode == "next_n_days":
-        n = payload.n_days or 3
-        dates = get_next_class_days(n)
-        counts = absence_counts_from_dates(timetable, dates)
-        scenario_label = f"If you are absent for the next {n} class days"
-
-    elif payload.mode == "selected_weekdays":
-        selected_days = payload.selected_days or ["Monday"]
-        weeks = payload.weeks or 1
-        counts = absence_counts_from_weekdays(timetable, selected_days, weeks)
-        scenario_label = f"If you are absent on {', '.join(selected_days)} for {weeks} week(s)"
-
-    else:
-        raise HTTPException(status_code=400, detail="Invalid mode")
-
-    predicted_avg = simulate_future_absence(subjects, counts)
-
-    return {
-        "scenario_label": scenario_label,
-        "current_avg": current_avg,
-        "predicted_avg": predicted_avg,
-        "drop": round(current_avg - predicted_avg, 2),
-    }
 @app.post("/users/{user_id}/import-attendance")
 def import_attendance(user_id: int, payload: ERPImportPayload):
-    if not isinstance(payload.subjects, list) or not isinstance(payload.attendance, dict):
-        raise HTTPException(status_code=400, detail="Invalid payload")
+    if not payload.subjects:
+        raise HTTPException(status_code=400, detail="No subjects provided")
 
     conn = get_conn()
     try:
@@ -714,21 +232,305 @@ def import_attendance(user_id: int, payload: ERPImportPayload):
                 total = int(stats.get("totalsessions", 0) or 0)
                 present = int(stats.get("presentSessionsCount", 0) or 0)
 
-                cur.execute(
-                    """
-                    INSERT INTO subjects (user_id, subject_name, attended_classes, total_classes, required_percentage)
+                cur.execute("""
+                    INSERT INTO subjects (
+                        user_id,
+                        subject_name,
+                        attended_classes,
+                        total_classes,
+                        required_percentage
+                    )
                     VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (user_id, subject_name)
                     DO UPDATE SET
                         attended_classes = EXCLUDED.attended_classes,
                         total_classes = EXCLUDED.total_classes,
                         required_percentage = EXCLUDED.required_percentage
-                    """,
-                    (user_id, subject_name, present, total, 75),
-                )
+                """, (user_id, subject_name, present, total, 75))
+
                 imported += 1
 
             conn.commit()
-            return {"message": "Attendance imported", "subjects_imported": imported}
+
+        return {
+            "message": f"{imported} subjects imported successfully.",
+            "subjects_imported": imported,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------
+# SUBJECTS
+# ---------------------------
+
+@app.get("/users/{user_id}/subjects")
+def get_subjects(user_id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, subject_name, attended_classes, total_classes, required_percentage
+                FROM subjects
+                WHERE user_id = %s
+                ORDER BY subject_name
+            """, (user_id,))
+            rows = cur.fetchall()
+
+        result = []
+        for r in rows:
+            attended = int(r["attended_classes"] or 0)
+            total = int(r["total_classes"] or 0)
+            required = int(r["required_percentage"] or 75)
+
+            percentage = round((attended / total) * 100, 1) if total > 0 else 0.0
+
+            safe_bunks = 0
+            if total > 0 and percentage >= required:
+                req = required / 100
+                safe_bunks = max(0, int((attended / req) - total))
+
+            need_to_recover = 0
+            if percentage < required:
+                req = required / 100
+                x = ((req * total) - attended) / (1 - req) if req < 1 else 0
+                need_to_recover = max(0, int(x) if x == int(x) else int(x) + 1)
+
+            status = "Danger"
+            if percentage >= required + 5:
+                status = "Safe"
+            elif percentage >= required:
+                status = "Warning"
+
+            result.append({
+                "id": r["id"],
+                "subject_name": r["subject_name"],
+                "attended_classes": attended,
+                "total_classes": total,
+                "required_percentage": required,
+                "attendance_percentage": percentage,
+                "safe_bunks": safe_bunks,
+                "need_to_recover": need_to_recover,
+                "status": status,
+            })
+
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/users/{user_id}/subjects")
+def save_subject(user_id: int, payload: SubjectPayload):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO subjects (
+                    user_id, subject_name, attended_classes, total_classes, required_percentage
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, subject_name)
+                DO UPDATE SET
+                    attended_classes = EXCLUDED.attended_classes,
+                    total_classes = EXCLUDED.total_classes,
+                    required_percentage = EXCLUDED.required_percentage
+            """, (
+                user_id,
+                payload.subject_name,
+                payload.attended_classes,
+                payload.total_classes,
+                payload.required_percentage,
+            ))
+            conn.commit()
+
+        return {"message": "Subject saved successfully."}
+    finally:
+        conn.close()
+
+
+@app.delete("/users/{user_id}/subjects/{subject_id}")
+def delete_subject(user_id: int, subject_id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM subjects
+                WHERE id = %s AND user_id = %s
+            """, (subject_id, user_id))
+            conn.commit()
+
+        return {"message": "Subject deleted successfully."}
+    finally:
+        conn.close()
+
+
+# ---------------------------
+# CLEAR DATA
+# ---------------------------
+
+@app.delete("/users/{user_id}/clear-data")
+def clear_user_data(user_id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM subjects WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM timetable WHERE user_id = %s", (user_id,))
+            conn.commit()
+
+        return {"message": "All subjects and timetable data cleared successfully."}
+    finally:
+        conn.close()
+
+
+# ---------------------------
+# DASHBOARD
+# ---------------------------
+
+from datetime import datetime
+
+@app.get("/users/{user_id}/dashboard")
+def get_dashboard(user_id: int):
+    conn = get_conn()
+    try:
+        today_name = datetime.now().strftime("%A")  # Monday, Tuesday, etc.
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT subject_name, attended_classes, total_classes
+                FROM subjects
+                WHERE user_id = %s
+            """, (user_id,))
+            subjects = cur.fetchall()
+
+            cur.execute("""
+                SELECT period_no, subject_name
+                FROM timetable
+                WHERE user_id = %s AND day_name = %s
+                ORDER BY period_no
+            """, (user_id, today_name))
+            today_rows = cur.fetchall()
+
+        total_present = sum((s.get("attended_classes") or 0) for s in subjects)
+        total_classes = sum((s.get("total_classes") or 0) for s in subjects)
+        total_absent = max(0, total_classes - total_present)
+
+        current_avg = (
+            sum(
+                ((s.get("attended_classes") or 0) / (s.get("total_classes") or 1)) * 100
+                if (s.get("total_classes") or 0) > 0 else 0
+                for s in subjects
+            ) / len(subjects)
+            if subjects else 0
+        )
+
+        overall_percentage = (
+            (total_present / total_classes) * 100
+            if total_classes > 0 else 0
+        )
+
+        today_classes = [
+            {
+                "period_no": row["period_no"],
+                "subject_name": row["subject_name"],
+                "marked_status": None,
+            }
+            for row in today_rows
+            if row.get("subject_name")
+        ]
+
+        return {
+            "current_avg": round(current_avg, 1),
+            "overall_percentage": round(overall_percentage, 1),
+            "total_present": total_present,
+            "total_absent": total_absent,
+            "today_classes": today_classes,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------
+# MARK ATTENDANCE
+# ---------------------------
+
+@app.post("/users/{user_id}/mark-attendance")
+def mark_attendance(user_id: int, payload: MarkAttendance):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if payload.status == "present":
+                cur.execute("""
+                    UPDATE subjects
+                    SET attended_classes = attended_classes + 1,
+                        total_classes = total_classes + 1
+                    WHERE user_id = %s AND subject_name = %s
+                """, (user_id, payload.subject_name))
+            else:
+                cur.execute("""
+                    UPDATE subjects
+                    SET total_classes = total_classes + 1
+                    WHERE user_id = %s AND subject_name = %s
+                """, (user_id, payload.subject_name))
+
+            conn.commit()
+
+        return {"message": "Marked successfully"}
+    finally:
+        conn.close()
+
+
+# ---------------------------
+# SCHEDULE
+# ---------------------------
+
+@app.get("/users/{user_id}/schedule")
+def get_schedule(user_id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT day_name, period_no, subject_name
+                FROM timetable
+                WHERE user_id = %s
+                ORDER BY
+                    CASE day_name
+                        WHEN 'Monday' THEN 1
+                        WHEN 'Tuesday' THEN 2
+                        WHEN 'Wednesday' THEN 3
+                        WHEN 'Thursday' THEN 4
+                        WHEN 'Friday' THEN 5
+                        WHEN 'Saturday' THEN 6
+                        ELSE 7
+                    END,
+                    period_no
+            """, (user_id,))
+            rows = cur.fetchall()
+
+        return rows
+    finally:
+        conn.close()
+
+
+@app.post("/users/{user_id}/schedule")
+def save_schedule(user_id: int, payload: list[ScheduleEntry]):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            for item in payload:
+                cur.execute("""
+                    INSERT INTO timetable (user_id, day_name, period_no, subject_name)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (user_id, day_name, period_no)
+                    DO UPDATE SET subject_name = EXCLUDED.subject_name
+                """, (
+                    user_id,
+                    item.day_name,
+                    item.period_no,
+                    item.subject_name,
+                ))
+
+            conn.commit()
+
+        return {"message": "Schedule saved successfully."}
     finally:
         conn.close()
