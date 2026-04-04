@@ -534,3 +534,54 @@ def save_schedule(user_id: int, payload: list[ScheduleEntry]):
         return {"message": "Schedule saved successfully."}
     finally:
         conn.close()
+        
+from pydantic import BaseModel
+
+class GoogleUserPayload(BaseModel):
+    email: str
+    name: str = "Student"
+
+
+@app.post("/auth/google-user")
+def auth_google_user(payload: GoogleUserPayload):
+    email = payload.email.strip().lower()
+
+    if not email.endswith("@mlrit.ac.in"):
+        raise HTTPException(status_code=403, detail="Only MLRIT accounts allowed")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # check existing user
+            cur.execute("""
+                SELECT id, email, name, college, branch, semester, section, default_target
+                FROM users
+                WHERE LOWER(email) = %s
+            """, (email,))
+            user = cur.fetchone()
+
+            if user:
+                return user
+
+            # create new user
+            cur.execute("""
+                INSERT INTO users (email, name, college, branch, semester, section, default_target)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, email, name, college, branch, semester, section, default_target
+            """, (
+                email,
+                payload.name or "Student",
+                "MLRIT",
+                "",
+                "",
+                "",
+                75,
+            ))
+
+            new_user = cur.fetchone()
+            conn.commit()
+
+            return new_user
+
+    finally:
+        conn.close()
