@@ -392,35 +392,25 @@ from datetime import datetime
 def get_dashboard(user_id: int):
     conn = get_conn()
     try:
-        today_name = datetime.now().strftime("%A")  # Monday, Tuesday, etc.
-
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT subject_name, attended_classes, total_classes
+                SELECT attended_classes, total_classes
                 FROM subjects
                 WHERE user_id = %s
             """, (user_id,))
-            subjects = cur.fetchall()
+            rows = cur.fetchall()
 
-            cur.execute("""
-                SELECT period_no, subject_name
-                FROM timetable
-                WHERE user_id = %s AND day_name = %s
-                ORDER BY period_no
-            """, (user_id, today_name))
-            today_rows = cur.fetchall()
-
-        total_present = sum((s.get("attended_classes") or 0) for s in subjects)
-        total_classes = sum((s.get("total_classes") or 0) for s in subjects)
+        total_present = sum(r["attended_classes"] for r in rows)
+        total_classes = sum(r["total_classes"] for r in rows)
         total_absent = max(0, total_classes - total_present)
 
         current_avg = (
             sum(
-                ((s.get("attended_classes") or 0) / (s.get("total_classes") or 1)) * 100
-                if (s.get("total_classes") or 0) > 0 else 0
-                for s in subjects
-            ) / len(subjects)
-            if subjects else 0
+                (r["attended_classes"] / r["total_classes"] * 100)
+                if r["total_classes"] > 0 else 0
+                for r in rows
+            ) / len(rows)
+            if rows else 0
         )
 
         overall_percentage = (
@@ -428,26 +418,16 @@ def get_dashboard(user_id: int):
             if total_classes > 0 else 0
         )
 
-        today_classes = [
-            {
-                "period_no": row["period_no"],
-                "subject_name": row["subject_name"],
-                "marked_status": None,
-            }
-            for row in today_rows
-            if row.get("subject_name")
-        ]
-
         return {
             "current_avg": round(current_avg, 1),
             "overall_percentage": round(overall_percentage, 1),
             "total_present": total_present,
             "total_absent": total_absent,
-            "today_classes": today_classes,
+            "today_classes": []
         }
+
     finally:
         conn.close()
-
 
 # ---------------------------
 # MARK ATTENDANCE
@@ -534,7 +514,7 @@ def save_schedule(user_id: int, payload: list[ScheduleEntry]):
         return {"message": "Schedule saved successfully."}
     finally:
         conn.close()
-        
+
 from pydantic import BaseModel
 
 class GoogleUserPayload(BaseModel):
