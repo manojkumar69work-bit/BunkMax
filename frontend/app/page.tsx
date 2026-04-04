@@ -317,21 +317,7 @@ export default function Home() {
             <MetricCard title="Absent" value={`${data.total_absent}`} />
           </div>
 
-          <div
-            className={`rounded-2xl border p-3 text-sm font-medium ${
-              data.overall_percentage >= 75
-                ? "border-green-500/30 bg-green-500/10 text-green-200"
-                : data.overall_percentage >= 65
-                ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
-                : "border-red-500/30 bg-red-500/10 text-red-200"
-            }`}
-          >
-            {data.overall_percentage >= 75
-              ? "You are above 75% ✅"
-              : data.overall_percentage >= 65
-              ? "You are getting close to shortage ⚠️"
-              : "Your attendance is low 🚨"}
-          </div>
+          
 
           <div className="glass-card p-4">
             <div className="flex items-center justify-between gap-3">
@@ -349,6 +335,37 @@ export default function Home() {
               </Link>
             </div>
           </div>
+
+          <div className="section-title">Quick Actions</div>
+
+          <QuickCard
+            title="Should I skip tomorrow?"
+            desc="Instant answer for the next class day."
+            buttonText={busy === "tomorrow" ? "Checking..." : "Check Tomorrow"}
+            onClick={runTomorrow}
+            result={tomorrow}
+            type="normal"
+          />
+
+          <QuickCard
+            title="Best day to skip"
+            desc="Find the safest upcoming day."
+            buttonText={busy === "best" ? "Finding..." : "Find Best Day"}
+            onClick={runBest}
+            result={best}
+            type="best"
+          />
+
+          <QuickCard
+            title="Avoid skipping on"
+            desc="Know the worst upcoming day to miss."
+            buttonText={busy === "worst" ? "Finding..." : "Find Worst Day"}
+            onClick={runWorst}
+            result={worst}
+            type="worst"
+          />
+
+
 
           <div className="section-title">Today&apos;s Classes</div>
 
