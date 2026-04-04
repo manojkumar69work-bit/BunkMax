@@ -6,6 +6,9 @@ import Link from "next/link";
 import {
   getDashboard,
   getSubjects,
+  getTomorrow,
+  getBestDay,
+  getWorstDay,
   markAttendance,
 } from "@/lib/api";
 import { useAppUser } from "@/lib/user";
@@ -42,6 +45,10 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [markingKey, setMarkingKey] = useState<string>("");
+  const [tomorrow, setTomorrow] = useState<any>(null);
+  const [best, setBest] = useState<any>(null);
+  const [worst, setWorst] = useState<any>(null);
+  const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
 
   useEffect(() => {
     if (!appUser) return;
@@ -64,6 +71,41 @@ export default function Home() {
       setError(e instanceof Error ? e.message : "Load failed");
     } finally {
       setLoading(false);
+    }
+  }
+  async function runTomorrow() {
+    if (!appUser) return;
+    try {
+      setBusy("tomorrow");
+      setTomorrow(await getTomorrow(appUser.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runBest() {
+    if (!appUser) return;
+    try {
+      setBusy("best");
+      setBest(await getBestDay(appUser.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runWorst() {
+    if (!appUser) return;
+    try {
+      setBusy("worst");
+      setWorst(await getWorstDay(appUser.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusy("");
     }
   }
 
@@ -397,6 +439,77 @@ function MetricCard({
     <div className="glass-card p-4">
       <p className="metric-title">{title}</p>
       <p className="metric-value">{value}</p>
+    </div>
+  );
+}
+function QuickCard({
+  title,
+  desc,
+  buttonText,
+  onClick,
+  result,
+  type,
+}: {
+  title: string;
+  desc: string;
+  buttonText: string;
+  onClick: () => void;
+  result: any;
+  type: "normal" | "best" | "worst";
+}) {
+  return (
+    <div className="soft-card p-4 space-y-3">
+      <div>
+        <p className="font-semibold">{title}</p>
+        <p className="text-xs text-gray-400 mt-1">{desc}</p>
+      </div>
+
+      <button type="button" onClick={onClick} className="secondary-btn">
+        {buttonText}
+      </button>
+
+      {result && (
+        <div className="glass-card p-4 space-y-3">
+          <p className="font-semibold">{result.title}</p>
+
+          <div className="grid grid-cols-3 gap-2">
+            <MiniMetric title="Current" value={`${Number(result.current || 0).toFixed(1)}%`} />
+            <MiniMetric title="New" value={`${Number(result.new || 0).toFixed(1)}%`} />
+            <MiniMetric title="Drop" value={`${Number(result.drop || 0).toFixed(1)}%`} />
+          </div>
+
+          <div
+            className={`rounded-xl border p-2 text-sm ${
+              type === "worst"
+                ? "border-red-500/30 bg-red-500/10 text-red-200"
+                : result.safe
+                ? "border-green-500/30 bg-green-500/10 text-green-200"
+                : "border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
+            }`}
+          >
+            {type === "worst"
+              ? "Avoid skipping on this day ❌"
+              : result.safe
+              ? "Safe to skip ✅"
+              : "Not safe to skip ⚠️"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MiniMetric({
+  title,
+  value,
+}: {
+  title: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-center">
+      <p className="text-[11px] text-gray-400">{title}</p>
+      <p className="text-sm font-bold mt-1">{value}</p>
     </div>
   );
 }
