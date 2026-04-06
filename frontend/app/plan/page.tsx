@@ -388,9 +388,9 @@ export default function PlanPage() {
               <p className="font-semibold">{result.scenario_label}</p>
 
               <div className="grid grid-cols-3 gap-2">
-                <MiniMetric title="Current" value={`${result.current_avg.toFixed(1)}%`} />
-                <MiniMetric title="Predicted" value={`${result.predicted_avg.toFixed(1)}%`} />
-                <MiniMetric title="Drop" value={`${result.drop.toFixed(1)}%`} />
+                <MiniMetric title="Current" value={`${result.current_avg.toFixed(2)}%`} />
+                <MiniMetric title="Predicted" value={`${result.predicted_avg.toFixed(2)}%`} />
+                <MiniMetric title="Drop" value={`${result.drop.toFixed(2)}%`} />
               </div>
 
               <div

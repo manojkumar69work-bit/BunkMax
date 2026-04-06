@@ -3,10 +3,12 @@
 html,
 body {
   background:
-    radial-gradient(circle at top, rgba(59, 130, 246, 0.12), transparent 25%),
+    radial-gradient(circle at top, rgba(59, 130, 246, 0.16), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(168, 85, 247, 0.1), transparent 22%),
     #070a10;
   color: white;
   min-height: 100%;
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
@@ -52,11 +54,45 @@ button:active {
 }
 
 .glass-card {
-  @apply rounded-2xl border border-white/10 bg-white/5 shadow-[0_10px_30px_rgba(0,0,0,0.25)];
+  position: relative;
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.glass-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.12),
+    rgba(255, 255, 255, 0.02) 35%,
+    rgba(255, 255, 255, 0.01) 100%
+  );
 }
 
 .soft-card {
-  @apply rounded-2xl border border-white/10 bg-gradient-to-br from-white/8 to-white/[0.03] shadow-[0_10px_30px_rgba(0,0,0,0.22)];
+  position: relative;
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.08),
+    rgba(255, 255, 255, 0.03)
+  );
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .section-title {
@@ -64,15 +100,41 @@ button:active {
 }
 
 .input-ui {
-  @apply w-full rounded-xl bg-white/10 border border-white/10 px-3 py-3 outline-none text-white placeholder:text-gray-400;
+  @apply w-full rounded-xl px-3 py-3 outline-none text-white placeholder:text-gray-400;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.input-ui:focus {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .primary-btn {
-  @apply w-full rounded-xl bg-white text-black py-3 font-semibold hover:bg-gray-100;
+  @apply w-full rounded-xl py-3 font-semibold text-black;
+  background: linear-gradient(180deg, #ffffff 0%, #ececec 100%);
+  box-shadow:
+    0 8px 24px rgba(255, 255, 255, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.primary-btn:hover {
+  filter: brightness(1.02);
 }
 
 .secondary-btn {
-  @apply w-full rounded-xl border border-white/10 bg-white/10 py-3 font-medium text-white hover:bg-white/15;
+  @apply w-full rounded-xl py-3 font-medium text-white;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.secondary-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .metric-title {
@@ -80,5 +142,5 @@ button:active {
 }
 
 .metric-value {
-  @apply text-2xl font-bold mt-1;
+  @apply mt-1 text-2xl font-bold;
 }

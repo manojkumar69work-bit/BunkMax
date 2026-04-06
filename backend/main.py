@@ -441,8 +441,8 @@ def get_dashboard(user_id: int):
         ]
 
         return {
-            "current_avg": round(current_avg, 1),
-            "overall_percentage": round(overall_percentage, 1),
+            "current_avg": round(current_avg, 2),
+            "overall_percentage": round(overall_percentage, 2),
             "total_present": total_present,
             "total_absent": total_absent,
             "today_classes": today_classes,

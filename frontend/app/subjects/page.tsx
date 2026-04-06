@@ -26,7 +26,7 @@ function recalculateSubject(subject: Partial<Subject>): Subject {
 
   const attendance_percentage =
     total_classes > 0
-      ? Number(((attended_classes / total_classes) * 100).toFixed(1))
+      ? Number(((attended_classes / total_classes) * 100).toFixed(2))
       : 0;
 
   let status = "Danger";

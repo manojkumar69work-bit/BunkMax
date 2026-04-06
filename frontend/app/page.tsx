@@ -311,8 +311,8 @@ export default function Home() {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3">
-            <MetricCard title="Average" value={`${data.current_avg.toFixed(1)}%`} />
-            <MetricCard title="Overall" value={`${data.overall_percentage.toFixed(1)}%`} />
+            <MetricCard title="Average" value={formatPercent(data.current_avg)} />
+            <MetricCard title="Overall" value={formatPercent(data.overall_percentage)} />
             <MetricCard title="Present" value={`${data.total_present}`} />
             <MetricCard title="Absent" value={`${data.total_absent}`} />
           </div>
@@ -329,7 +329,7 @@ export default function Home() {
               </div>
               <Link
                 href="/import"
-                className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black"
+                className="inline-flex min-w-[96px] items-center justify-center rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md"
               >
                 Open
               </Link>
@@ -529,4 +529,7 @@ function MiniMetric({
       <p className="text-sm font-bold mt-1">{value}</p>
     </div>
   );
+}
+function formatPercent(value: number) {
+  return `${Number(value.toFixed(2))}%`;
 }
