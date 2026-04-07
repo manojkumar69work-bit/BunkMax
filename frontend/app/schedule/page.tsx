@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import { getSubjects, getTimetable, saveTimetable } from "@/lib/api";
+import FullScreenLoader from "@/components/FullScreenLoader";
 import { useAppUser } from "@/lib/user";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -124,8 +125,9 @@ export default function SchedulePage() {
 
   const currentDayPeriods = timetable[selectedDay] || Array(PERIODS).fill("");
 
+  
   if (loadingUser) {
-    return <div className="app-shell text-sm text-gray-400">Loading user...</div>;
+    return <FullScreenLoader label="Loading..." />;
   }
 
   if (!appUser) {

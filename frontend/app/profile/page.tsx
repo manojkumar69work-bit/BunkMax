@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { signOut } from "next-auth/react";
 import BottomNav from "@/components/BottomNav";
 import { clearAllUserData, getUser, updateUser } from "@/lib/api";
+import FullScreenLoader from "@/components/FullScreenLoader";
 import { useAppUser } from "@/lib/user";
 
 export default function ProfilePage() {
@@ -67,7 +68,7 @@ export default function ProfilePage() {
   }
 
   if (loadingUser) {
-    return <div className="app-shell text-sm text-gray-400">Loading user...</div>;
+    return <FullScreenLoader label="Loading Profile..." />;
   }
 
   if (!appUser) {

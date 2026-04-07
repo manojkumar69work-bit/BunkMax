@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import { deleteSubject, getSubjects, saveSubject } from "@/lib/api";
+import FullScreenLoader from "@/components/FullScreenLoader";
 import { useAppUser } from "@/lib/user";
 
 type Subject = {
@@ -211,7 +212,7 @@ export default function SubjectsPage() {
   }
 
   if (loadingUser) {
-    return <div className="app-shell text-sm text-gray-400">Loading user...</div>;
+    return <FullScreenLoader label="Loading..." />;
   }
 
   if (!appUser) {

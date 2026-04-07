@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import { getSubjects, getTimetable } from "@/lib/api";
+import FullScreenLoader from "@/components/FullScreenLoader";
 import { useAppUser } from "@/lib/user";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -273,7 +274,7 @@ export default function PlanPage() {
   const bestRecoveryDay = dayRecovery.length > 0 ? dayRecovery[0] : null;
 
   if (loadingUser) {
-    return <div className="app-shell text-sm text-gray-400">Loading user...</div>;
+    return <FullScreenLoader label="Loading..." />;
   }
 
   if (!appUser) {

@@ -594,8 +594,7 @@ def get_tomorrow(user_id: int):
     conn = get_conn()
     try:
         india_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-        tomorrow = india_now + timedelta(days=1)
-        tomorrow_name = tomorrow.strftime("%A")
+        tomorrow_name = (india_now + timedelta(days=1)).strftime("%A")
 
         with conn.cursor() as cur:
             cur.execute("""
@@ -608,79 +607,140 @@ def get_tomorrow(user_id: int):
             cur.execute("""
                 SELECT subject_name
                 FROM timetable
-                WHERE user_id = %s AND day_name = %s
+                WHERE user_id = %s AND day_name = %s AND subject_name != ''
             """, (user_id, tomorrow_name))
             tomorrow_classes = cur.fetchall()
 
-        total = 0
-        attended = 0
+        current_present = sum((s.get("attended_classes") or 0) for s in subjects)
+        current_total = sum((s.get("total_classes") or 0) for s in subjects)
 
-        for s in subjects:
-            attended += s["attended_classes"]
-            total += s["total_classes"]
+        current_pct = (current_present / current_total * 100) if current_total > 0 else 0
 
-        if tomorrow_classes:
-            total += len(tomorrow_classes)
+        missed_classes = len(tomorrow_classes)
+        new_total = current_total + missed_classes
+        new_present = current_present
 
-        new_pct = (attended / total) * 100 if total > 0 else 0
+        new_pct = (new_present / new_total * 100) if new_total > 0 else 0
 
         return {
             "title": f"Tomorrow ({tomorrow_name})",
-            "current": (attended / total) * 100 if total else 0,
-            "new": new_pct,
-            "drop": 0,
+            "current": round(current_pct, 2),
+            "new": round(new_pct, 2),
+            "drop": round(current_pct - new_pct, 2),
             "safe": new_pct >= 75
         }
 
     finally:
         conn.close()
 @app.get("/users/{user_id}/best-day")
-def best_day(user_id: int):
+def get_best_day(user_id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT day_name, COUNT(*) as cnt
+                SELECT attended_classes, total_classes
+                FROM subjects
+                WHERE user_id = %s
+            """, (user_id,))
+            subjects = cur.fetchall()
+
+            cur.execute("""
+                SELECT day_name, COUNT(*) AS class_count
                 FROM timetable
                 WHERE user_id = %s AND subject_name != ''
                 GROUP BY day_name
             """, (user_id,))
-            days = cur.fetchall()
+            day_rows = cur.fetchall()
 
-        best = min(days, key=lambda x: x["cnt"]) if days else None
+        current_present = sum((s.get("attended_classes") or 0) for s in subjects)
+        current_total = sum((s.get("total_classes") or 0) for s in subjects)
+        current_pct = (current_present / current_total * 100) if current_total > 0 else 0
+
+        if not day_rows:
+            return {
+                "title": "No timetable data",
+                "current": round(current_pct, 2),
+                "new": round(current_pct, 2),
+                "drop": 0.0,
+                "safe": current_pct >= 75
+            }
+
+        best = None
+        best_new_pct = -1
+
+        for row in day_rows:
+            missed = int(row.get("class_count") or 0)
+            new_total = current_total + missed
+            new_pct = (current_present / new_total * 100) if new_total > 0 else 0
+
+            if new_pct > best_new_pct:
+                best_new_pct = new_pct
+                best = row
 
         return {
-            "title": f"Best Day: {best['day_name']}" if best else "No data",
-            "current": 0,
-            "new": 0,
-            "drop": 0,
-            "safe": True
+            "title": f"Best Day: {best['day_name']}",
+            "current": round(current_pct, 2),
+            "new": round(best_new_pct, 2),
+            "drop": round(current_pct - best_new_pct, 2),
+            "safe": best_new_pct >= 75
         }
 
     finally:
         conn.close()
 @app.get("/users/{user_id}/worst-day")
-def worst_day(user_id: int):
+def get_worst_day(user_id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT day_name, COUNT(*) as cnt
+                SELECT attended_classes, total_classes
+                FROM subjects
+                WHERE user_id = %s
+            """, (user_id,))
+            subjects = cur.fetchall()
+
+            cur.execute("""
+                SELECT day_name, COUNT(*) AS class_count
                 FROM timetable
                 WHERE user_id = %s AND subject_name != ''
                 GROUP BY day_name
             """, (user_id,))
-            days = cur.fetchall()
+            day_rows = cur.fetchall()
 
-        worst = max(days, key=lambda x: x["cnt"]) if days else None
+        current_present = sum((s.get("attended_classes") or 0) for s in subjects)
+        current_total = sum((s.get("total_classes") or 0) for s in subjects)
+        current_pct = (current_present / current_total * 100) if current_total > 0 else 0
+
+        if not day_rows:
+            return {
+                "title": "No timetable data",
+                "current": round(current_pct, 2),
+                "new": round(current_pct, 2),
+                "drop": 0.0,
+                "safe": current_pct >= 75
+            }
+
+        worst = None
+        worst_new_pct = float("inf")
+
+        for row in day_rows:
+            missed = int(row.get("class_count") or 0)
+            new_total = current_total + missed
+            new_pct = (current_present / new_total * 100) if new_total > 0 else 0
+
+            if new_pct < worst_new_pct:
+                worst_new_pct = new_pct
+                worst = row
 
         return {
-            "title": f"Worst Day: {worst['day_name']}" if worst else "No data",
-            "current": 0,
-            "new": 0,
-            "drop": 0,
-            "safe": False
+            "title": f"Worst Day: {worst['day_name']}",
+            "current": round(current_pct, 2),
+            "new": round(worst_new_pct, 2),
+            "drop": round(current_pct - worst_new_pct, 2),
+            "safe": worst_new_pct >= 75
         }
 
     finally:
         conn.close()
+        
+

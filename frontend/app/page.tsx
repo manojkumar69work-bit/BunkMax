@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import Link from "next/link";
+import FullScreenLoader from "@/components/FullScreenLoader";
 import {
   getDashboard,
   getSubjects,
@@ -265,8 +266,10 @@ export default function Home() {
     return `${subject.attended_classes}/${subject.total_classes}`;
   }
 
+  
+
   if (loadingUser) {
-    return <div className="app-shell text-sm text-gray-400">Loading user...</div>;
+    return <FullScreenLoader label="Loading BunkMax..." />;
   }
 
   if (!appUser) {
@@ -293,7 +296,7 @@ export default function Home() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">📘 BunkMax</h1>
-          <p className="text-sm text-gray-400 mt-1">No tension. No condonation.</p>
+          <p className="text-sm text-gray-400 mt-1">No Shocks at Semester End.</p>
         </div>
         <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-gray-300">
           Home
