@@ -6,8 +6,6 @@ import Link from "next/link";
 import { API_BASE } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
 import {
-  getDashboard,
-  getSubjects,
   getTomorrow,
   getBestDay,
   getWorstDay,
@@ -27,32 +25,23 @@ type DashboardData = {
   }[];
 };
 
-type Subject = {
-  id: number;
+type HomeSubject = {
   subject_name: string;
   attended_classes: number;
   total_classes: number;
-  required_percentage: number;
-  attendance_percentage: number;
-  safe_bunks: number;
-  need_to_recover: number;
-  status: string;
 };
 
 export default function Home() {
   const { appUser, loadingUser } = useAppUser();
 
   const [data, setData] = useState<DashboardData | null>(null);
-  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [subjects, setSubjects] = useState<HomeSubject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [markingKey, setMarkingKey] = useState<string>("");
   const [tomorrow, setTomorrow] = useState<any>(null);
   const [best, setBest] = useState<any>(null);
   const [worst, setWorst] = useState<any>(null);
-  const [dashboard, setDashboard] = useState<any>(null);
-
-  const [todayClasses, setTodayClasses] = useState<any[]>([]);
   const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
 
   useEffect(() => {
@@ -65,21 +54,32 @@ export default function Home() {
       setLoading(true);
       setError("");
 
+      const cacheKey = `bunkmax_home_${userId}`;
+      const cached = sessionStorage.getItem(cacheKey);
+
+      if (cached) {
+        const homeData = JSON.parse(cached);
+        setData(homeData.dashboard);
+        setSubjects(homeData.subjects);
+        setLoading(false);
+        return;
+      }
+
       const res = await fetch(`${API_BASE}/users/${userId}/home-data`);
 
       if (!res.ok) {
-        throw new Error("Failed to load home data");
+        const text = await res.text();
+        throw new Error(text || "Failed to load home data");
       }
 
-      const data = await res.json();
+      const homeData = await res.json();
 
-      setDashboard(data.dashboard);
-      setSubjects(data.subjects);
-      setTodayClasses(data.today_classes);
+      sessionStorage.setItem(cacheKey, JSON.stringify(homeData));
 
-      
+      setData(homeData.dashboard);
+      setSubjects(homeData.subjects);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Load failed");
+      setError(e instanceof Error ? e.message : "Failed to load home data");
     } finally {
       setLoading(false);
     }
@@ -185,37 +185,10 @@ export default function Home() {
             newTotalAbsent += 1;
           }
 
-          const attendance_percentage =
-            total > 0 ? Number(((attended / total) * 100).toFixed(1)) : 0;
-
-          let safe_bunks = 0;
-          if (total > 0 && attendance_percentage >= subject.required_percentage) {
-            const req = subject.required_percentage / 100;
-            safe_bunks = Math.max(0, Math.floor(attended / req - total));
-          }
-
-          let need_to_recover = 0;
-          if (attendance_percentage < subject.required_percentage) {
-            const req = subject.required_percentage / 100;
-            const x = ((req * total) - attended) / (1 - req);
-            need_to_recover = Math.max(0, Math.ceil(x));
-          }
-
-          let updatedStatus = "Danger";
-          if (attendance_percentage >= subject.required_percentage + 5) {
-            updatedStatus = "Safe";
-          } else if (attendance_percentage >= subject.required_percentage) {
-            updatedStatus = "Warning";
-          }
-
           return {
             ...subject,
             attended_classes: attended,
             total_classes: total,
-            attendance_percentage,
-            safe_bunks,
-            need_to_recover,
-            status: updatedStatus,
           };
         });
 
@@ -224,10 +197,14 @@ export default function Home() {
             ? Number(
                 (
                   updatedSubjects.reduce(
-                    (sum, s) => sum + s.attendance_percentage,
+                    (sum, s) =>
+                      sum +
+                      (s.total_classes > 0
+                        ? (s.attended_classes / s.total_classes) * 100
+                        : 0),
                     0
                   ) / updatedSubjects.length
-                ).toFixed(1)
+                ).toFixed(2)
               )
             : 0;
 
@@ -237,9 +214,18 @@ export default function Home() {
                 (
                   (newTotalPresent / (newTotalPresent + newTotalAbsent)) *
                   100
-                ).toFixed(1)
+                ).toFixed(2)
               )
             : 0;
+
+        const updatedTodayClasses = data.today_classes.map((item) =>
+          item.period_no === periodNo
+            ? {
+                ...item,
+                marked_status: isSameClick ? null : status,
+              }
+            : item
+        );
 
         setData((prev) => {
           if (!prev) return prev;
@@ -250,16 +236,26 @@ export default function Home() {
             overall_percentage: overallPct,
             total_present: newTotalPresent,
             total_absent: newTotalAbsent,
-            today_classes: prev.today_classes.map((item) =>
-              item.period_no === periodNo
-                ? {
-                    ...item,
-                    marked_status: isSameClick ? null : status,
-                  }
-                : item
-            ),
+            today_classes: updatedTodayClasses,
           };
         });
+
+        if (appUser) {
+          const cacheKey = `bunkmax_home_${appUser.id}`;
+          sessionStorage.setItem(
+            cacheKey,
+            JSON.stringify({
+              dashboard: {
+                current_avg: currentAvg,
+                overall_percentage: overallPct,
+                total_present: newTotalPresent,
+                total_absent: newTotalAbsent,
+                today_classes: updatedTodayClasses,
+              },
+              subjects: updatedSubjects,
+            })
+          );
+        }
 
         return updatedSubjects;
       });
@@ -269,7 +265,7 @@ export default function Home() {
       setMarkingKey("");
     }
   }
-
+ 
   function getSubjectCounts(subjectName: string) {
     const subject = subjects.find((s) => s.subject_name === subjectName);
     if (!subject) return null;
