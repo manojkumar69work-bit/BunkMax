@@ -598,38 +598,37 @@ def get_tomorrow(user_id: int):
 
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT subject_name, attended_classes, total_classes
+                SELECT attended_classes, total_classes
                 FROM subjects
                 WHERE user_id = %s
             """, (user_id,))
             subjects = cur.fetchall()
 
             cur.execute("""
-                SELECT subject_name
+                SELECT COUNT(*) AS class_count
                 FROM timetable
-                WHERE user_id = %s AND day_name = %s AND subject_name != ''
+                WHERE user_id = %s
+                  AND day_name = %s
+                  AND subject_name IS NOT NULL
+                  AND TRIM(subject_name) != ''
             """, (user_id, tomorrow_name))
-            tomorrow_classes = cur.fetchall()
+            row = cur.fetchone()
 
         current_present = sum((s.get("attended_classes") or 0) for s in subjects)
         current_total = sum((s.get("total_classes") or 0) for s in subjects)
-
         current_pct = (current_present / current_total * 100) if current_total > 0 else 0
 
-        missed_classes = len(tomorrow_classes)
-        new_total = current_total + missed_classes
-        new_present = current_present
-
-        new_pct = (new_present / new_total * 100) if new_total > 0 else 0
+        missed_classes = int((row or {}).get("class_count") or 0)
+        predicted_total = current_total + missed_classes
+        predicted_pct = (current_present / predicted_total * 100) if predicted_total > 0 else 0
 
         return {
             "title": f"Tomorrow ({tomorrow_name})",
             "current": round(current_pct, 2),
-            "new": round(new_pct, 2),
-            "drop": round(current_pct - new_pct, 2),
-            "safe": new_pct >= 75
+            "new": round(predicted_pct, 2),
+            "drop": round(current_pct - predicted_pct, 2),
+            "safe": predicted_pct >= 75
         }
-
     finally:
         conn.close()
 @app.get("/users/{user_id}/best-day")
@@ -638,51 +637,112 @@ def get_best_day(user_id: int):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT attended_classes, total_classes
+                SELECT subject_name, attended_classes, total_classes
                 FROM subjects
                 WHERE user_id = %s
             """, (user_id,))
             subjects = cur.fetchall()
 
             cur.execute("""
-                SELECT day_name, COUNT(*) AS class_count
+                SELECT day_name, subject_name
                 FROM timetable
-                WHERE user_id = %s AND subject_name != ''
-                GROUP BY day_name
+                WHERE user_id = %s
+                  AND subject_name IS NOT NULL
+                  AND TRIM(subject_name) != ''
+                ORDER BY day_name, period_no
             """, (user_id,))
-            day_rows = cur.fetchall()
+            timetable_rows = cur.fetchall()
+
+        if not subjects:
+            return {
+                "title": "No subjects found",
+                "current": 0.0,
+                "new": 0.0,
+                "drop": 0.0,
+                "safe": False
+            }
 
         current_present = sum((s.get("attended_classes") or 0) for s in subjects)
         current_total = sum((s.get("total_classes") or 0) for s in subjects)
-        current_pct = (current_present / current_total * 100) if current_total > 0 else 0
+        current_overall = (current_present / current_total * 100) if current_total > 0 else 0
 
-        if not day_rows:
+        current_avg = (
+            sum(
+                ((s.get("attended_classes") or 0) / (s.get("total_classes") or 1)) * 100
+                if (s.get("total_classes") or 0) > 0 else 0
+                for s in subjects
+            ) / len(subjects)
+        )
+
+        day_map = {}
+        for row in timetable_rows:
+            day = row["day_name"]
+            subject_name = row["subject_name"]
+            day_map.setdefault(day, []).append(subject_name)
+
+        if not day_map:
             return {
                 "title": "No timetable data",
-                "current": round(current_pct, 2),
-                "new": round(current_pct, 2),
+                "current": round(current_overall, 2),
+                "new": round(current_overall, 2),
                 "drop": 0.0,
-                "safe": current_pct >= 75
+                "safe": current_overall >= 75
             }
 
-        best = None
-        best_new_pct = -1
+        results = []
 
-        for row in day_rows:
-            missed = int(row.get("class_count") or 0)
-            new_total = current_total + missed
-            new_pct = (current_present / new_total * 100) if new_total > 0 else 0
+        for day, day_subjects in day_map.items():
+            simulated = [
+                {
+                    "subject_name": s["subject_name"],
+                    "attended_classes": s["attended_classes"],
+                    "total_classes": s["total_classes"],
+                }
+                for s in subjects
+            ]
 
-            if new_pct > best_new_pct:
-                best_new_pct = new_pct
-                best = row
+            for scheduled_subject in day_subjects:
+                for s in simulated:
+                    if s["subject_name"].strip().lower() == scheduled_subject.strip().lower():
+                        s["total_classes"] += 1
+                        break
+
+            new_present = sum((s["attended_classes"] or 0) for s in simulated)
+            new_total = sum((s["total_classes"] or 0) for s in simulated)
+            new_overall = (new_present / new_total * 100) if new_total > 0 else 0
+
+            new_avg = (
+                sum(
+                    (s["attended_classes"] / s["total_classes"] * 100)
+                    if s["total_classes"] > 0 else 0
+                    for s in simulated
+                ) / len(simulated)
+            )
+
+            results.append({
+                "day": day,
+                "new_overall": new_overall,
+                "overall_drop": current_overall - new_overall,
+                "new_avg": new_avg,
+                "avg_drop": current_avg - new_avg,
+            })
+
+        # Best = minimum overall drop, tie-break by minimum avg drop
+        best = min(
+            results,
+            key=lambda r: (
+                round(r["overall_drop"], 6),
+                round(r["avg_drop"], 6),
+                r["day"]
+            )
+        )
 
         return {
-            "title": f"Best Day: {best['day_name']}",
-            "current": round(current_pct, 2),
-            "new": round(best_new_pct, 2),
-            "drop": round(current_pct - best_new_pct, 2),
-            "safe": best_new_pct >= 75
+            "title": f"Best Day: {best['day']}",
+            "current": round(current_overall, 2),
+            "new": round(best["new_overall"], 2),
+            "drop": round(best["overall_drop"], 2),
+            "safe": best["new_overall"] >= 75
         }
 
     finally:
@@ -693,54 +753,175 @@ def get_worst_day(user_id: int):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT attended_classes, total_classes
+                SELECT subject_name, attended_classes, total_classes
                 FROM subjects
                 WHERE user_id = %s
             """, (user_id,))
             subjects = cur.fetchall()
 
             cur.execute("""
-                SELECT day_name, COUNT(*) AS class_count
+                SELECT day_name, subject_name
                 FROM timetable
-                WHERE user_id = %s AND subject_name != ''
-                GROUP BY day_name
+                WHERE user_id = %s
+                  AND subject_name IS NOT NULL
+                  AND TRIM(subject_name) != ''
+                ORDER BY day_name, period_no
             """, (user_id,))
-            day_rows = cur.fetchall()
+            timetable_rows = cur.fetchall()
+
+        if not subjects:
+            return {
+                "title": "No subjects found",
+                "current": 0.0,
+                "new": 0.0,
+                "drop": 0.0,
+                "safe": False
+            }
 
         current_present = sum((s.get("attended_classes") or 0) for s in subjects)
         current_total = sum((s.get("total_classes") or 0) for s in subjects)
-        current_pct = (current_present / current_total * 100) if current_total > 0 else 0
+        current_overall = (current_present / current_total * 100) if current_total > 0 else 0
 
-        if not day_rows:
+        current_avg = (
+            sum(
+                ((s.get("attended_classes") or 0) / (s.get("total_classes") or 1)) * 100
+                if (s.get("total_classes") or 0) > 0 else 0
+                for s in subjects
+            ) / len(subjects)
+        )
+
+        day_map = {}
+        for row in timetable_rows:
+            day = row["day_name"]
+            subject_name = row["subject_name"]
+            day_map.setdefault(day, []).append(subject_name)
+
+        if not day_map:
             return {
                 "title": "No timetable data",
-                "current": round(current_pct, 2),
-                "new": round(current_pct, 2),
+                "current": round(current_overall, 2),
+                "new": round(current_overall, 2),
                 "drop": 0.0,
-                "safe": current_pct >= 75
+                "safe": current_overall >= 75
             }
 
-        worst = None
-        worst_new_pct = float("inf")
+        results = []
 
-        for row in day_rows:
-            missed = int(row.get("class_count") or 0)
-            new_total = current_total + missed
-            new_pct = (current_present / new_total * 100) if new_total > 0 else 0
+        for day, day_subjects in day_map.items():
+            simulated = [
+                {
+                    "subject_name": s["subject_name"],
+                    "attended_classes": s["attended_classes"],
+                    "total_classes": s["total_classes"],
+                }
+                for s in subjects
+            ]
 
-            if new_pct < worst_new_pct:
-                worst_new_pct = new_pct
-                worst = row
+            for scheduled_subject in day_subjects:
+                for s in simulated:
+                    if s["subject_name"].strip().lower() == scheduled_subject.strip().lower():
+                        s["total_classes"] += 1
+                        break
+
+            new_present = sum((s["attended_classes"] or 0) for s in simulated)
+            new_total = sum((s["total_classes"] or 0) for s in simulated)
+            new_overall = (new_present / new_total * 100) if new_total > 0 else 0
+
+            new_avg = (
+                sum(
+                    (s["attended_classes"] / s["total_classes"] * 100)
+                    if s["total_classes"] > 0 else 0
+                    for s in simulated
+                ) / len(simulated)
+            )
+
+            results.append({
+                "day": day,
+                "new_overall": new_overall,
+                "overall_drop": current_overall - new_overall,
+                "new_avg": new_avg,
+                "avg_drop": current_avg - new_avg,
+            })
+
+        # Worst = maximum overall drop, tie-break by maximum avg drop
+        worst = max(
+            results,
+            key=lambda r: (
+                round(r["overall_drop"], 6),
+                round(r["avg_drop"], 6),
+                r["day"]
+            )
+        )
 
         return {
-            "title": f"Worst Day: {worst['day_name']}",
-            "current": round(current_pct, 2),
-            "new": round(worst_new_pct, 2),
-            "drop": round(current_pct - worst_new_pct, 2),
-            "safe": worst_new_pct >= 75
+            "title": f"Worst Day: {worst['day']}",
+            "current": round(current_overall, 2),
+            "new": round(worst["new_overall"], 2),
+            "drop": round(worst["overall_drop"], 2),
+            "safe": worst["new_overall"] >= 75
         }
 
     finally:
         conn.close()
-        
+@app.get("/users/{user_id}/home-data")
+def get_home_data(user_id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT subject_name, attended_classes, total_classes
+                FROM subjects
+                WHERE user_id = %s
+            """, (user_id,))
+            subjects = cur.fetchall()
 
+            total_present = sum((s.get("attended_classes") or 0) for s in subjects)
+            total_classes = sum((s.get("total_classes") or 0) for s in subjects)
+
+            overall = (total_present / total_classes * 100) if total_classes else 0
+            avg = (
+                sum(
+                    (s["attended_classes"] / s["total_classes"] * 100)
+                    if s["total_classes"] else 0
+                    for s in subjects
+                ) / len(subjects)
+            ) if subjects else 0
+
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            today = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%A")
+
+            cur.execute("""
+                SELECT period_no, subject_name
+                FROM timetable
+                WHERE user_id = %s
+                  AND day_name = %s
+                  AND subject_name IS NOT NULL
+                  AND TRIM(subject_name) != ''
+                ORDER BY period_no
+            """, (user_id, today))
+            today_rows = cur.fetchall()
+
+            today_classes = [
+                {
+                    "period_no": row["period_no"],
+                    "subject_name": row["subject_name"],
+                    "marked_status": None,
+                }
+                for row in today_rows
+            ]
+
+        return {
+            "dashboard": {
+                "current_avg": round(avg, 2),
+                "overall_percentage": round(overall, 2),
+                "total_present": total_present,
+                "total_absent": max(0, total_classes - total_present),
+                "today_classes": today_classes,
+            },
+            "subjects": subjects
+        }
+
+    finally:
+        conn.close()

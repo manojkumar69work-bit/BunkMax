@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import Link from "next/link";
+import { API_BASE } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
 import {
   getDashboard,
@@ -49,6 +50,9 @@ export default function Home() {
   const [tomorrow, setTomorrow] = useState<any>(null);
   const [best, setBest] = useState<any>(null);
   const [worst, setWorst] = useState<any>(null);
+  const [dashboard, setDashboard] = useState<any>(null);
+
+  const [todayClasses, setTodayClasses] = useState<any[]>([]);
   const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
 
   useEffect(() => {
@@ -61,13 +65,19 @@ export default function Home() {
       setLoading(true);
       setError("");
 
-      const [dashboardRes, subjectsRes] = await Promise.all([
-        getDashboard(userId),
-        getSubjects(userId),
-      ]);
+      const res = await fetch(`${API_BASE}/users/${userId}/home-data`);
 
-      setData(dashboardRes);
-      setSubjects(subjectsRes);
+      if (!res.ok) {
+        throw new Error("Failed to load home data");
+      }
+
+      const data = await res.json();
+
+      setDashboard(data.dashboard);
+      setSubjects(data.subjects);
+      setTodayClasses(data.today_classes);
+
+      
     } catch (e) {
       setError(e instanceof Error ? e.message : "Load failed");
     } finally {
