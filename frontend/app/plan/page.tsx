@@ -2,104 +2,76 @@
 
 import { useEffect, useMemo, useState } from "react";
 import BottomNav from "@/components/BottomNav";
-import { getSubjects, getTimetable } from "@/lib/api";
-import FullScreenLoader from "@/components/FullScreenLoader";
+import { getSubjects, getTimetable, planBunks } from "@/lib/api";
 import { useAppUser } from "@/lib/user";
+import FullScreenLoader from "@/components/FullScreenLoader";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 type Subject = {
-  id: number;
+  id?: number;
   subject_name: string;
   attended_classes: number;
   total_classes: number;
-  required_percentage: number;
-  attendance_percentage: number;
-  safe_bunks: number;
-  need_to_recover: number;
-  status: string;
+  required_percentage?: number;
 };
 
 type Timetable = Record<string, string[]>;
 
-type PredictionResult = {
+type BunkResult = {
   scenario_label: string;
-  current_avg: number;
-  predicted_avg: number;
-  drop: number;
+  new_overall: number;
+  drop_overall: number;
+  new_avg: number;
+  drop_avg: number;
 };
 
-function normalizeSubjects(data: any[]): Subject[] {
-  return data.map((s: any) => {
-    const attended = Number(s.attended_classes ?? 0);
-    const total = Number(s.total_classes ?? 0);
-    const required = Number(s.required_percentage ?? 75);
+type RecoveryResult = {
+  label: string;
+  new_overall: number;
+  increase_overall: number;
+  new_avg: number;
+  increase_avg: number;
+};
 
-    const attendance_percentage =
-      total > 0 ? Number(((attended / total) * 100).toFixed(1)) : 0;
+function normalizeTimetable(data: any): Timetable {
+  if (!data) return {};
+  if (!Array.isArray(data)) return data;
 
-    let safe_bunks = 0;
-    if (total > 0 && attendance_percentage >= required) {
-      const req = required / 100;
-      safe_bunks = Math.max(0, Math.floor(attended / req - total));
+  const map: Timetable = {};
+
+  for (const row of data) {
+    const day = row.day_name;
+    const index = Number(row.period_no) - 1;
+    const subject = row.subject_name || "";
+
+    if (!map[day]) {
+      map[day] = Array(6).fill("");
     }
 
-    let need_to_recover = 0;
-    if (attendance_percentage < required) {
-      const req = required / 100;
-      const x = ((req * total) - attended) / (1 - req);
-      need_to_recover = Math.max(0, Math.ceil(x));
+    if (index >= 0 && index < 6) {
+      map[day][index] = subject;
     }
+  }
 
-    let status = "Danger";
-    if (attendance_percentage >= required + 5) {
-      status = "Safe";
-    } else if (attendance_percentage >= required) {
-      status = "Warning";
-    }
-
-    return {
-      id: Number(s.id ?? 0),
-      subject_name: String(s.subject_name ?? ""),
-      attended_classes: attended,
-      total_classes: total,
-      required_percentage: required,
-      attendance_percentage,
-      safe_bunks,
-      need_to_recover,
-      status,
-    };
-  });
+  return map;
 }
 
-function normalizeTimetable(input: any): Timetable {
-  const result: Timetable = Object.fromEntries(
-    DAYS.map((day) => [day, []])
-  ) as Timetable;
+function calcOverall(subjects: Subject[]) {
+  const present = subjects.reduce((sum, s) => sum + (s.attended_classes || 0), 0);
+  const total = subjects.reduce((sum, s) => sum + (s.total_classes || 0), 0);
+  return total > 0 ? (present / total) * 100 : 0;
+}
 
-  if (!input) return result;
-
-  if (!Array.isArray(input) && typeof input === "object") {
-    for (const day of DAYS) {
-      result[day] = Array.isArray(input[day]) ? input[day] : [];
-    }
-    return result;
-  }
-
-  if (Array.isArray(input)) {
-    for (const row of input) {
-      const day = row.day_name;
-      const periodIndex = Number(row.period_no) - 1;
-      const subject = row.subject_name || "";
-
-      if (DAYS.includes(day)) {
-        if (!result[day]) result[day] = [];
-        result[day][periodIndex] = subject;
-      }
-    }
-  }
-
-  return result;
+function calcAverage(subjects: Subject[]) {
+  if (subjects.length === 0) return 0;
+  return (
+    subjects.reduce((sum, s) => {
+      const total = s.total_classes || 0;
+      const attended = s.attended_classes || 0;
+      return sum + (total > 0 ? (attended / total) * 100 : 0);
+    }, 0) / subjects.length
+  );
 }
 
 export default function PlanPage() {
@@ -108,15 +80,19 @@ export default function PlanPage() {
   const [view, setView] = useState<"bunk" | "recovery">("bunk");
 
   const [mode, setMode] = useState("tomorrow");
-  const [nDays, setNDays] = useState(3);
-  const [weeks, setWeeks] = useState(1);
+  const [nDays, setNDays] = useState("");
+  const [weeks, setWeeks] = useState("1");
   const [selectedDays, setSelectedDays] = useState<string[]>(["Monday"]);
-  const [result, setResult] = useState<PredictionResult | null>(null);
+
+  const [bunkResult, setBunkResult] = useState<BunkResult | null>(null);
 
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [timetable, setTimetable] = useState<Timetable>({});
   const [loadingRecovery, setLoadingRecovery] = useState(true);
   const [error, setError] = useState("");
+
+  const [recoveryDays, setRecoveryDays] = useState("");
+  const [recoveryResult, setRecoveryResult] = useState<RecoveryResult | null>(null);
 
   useEffect(() => {
     if (!appUser) return;
@@ -127,18 +103,58 @@ export default function PlanPage() {
     try {
       setLoadingRecovery(true);
       setError("");
-
       const [subjectData, timetableData] = await Promise.all([
         getSubjects(userId),
         getTimetable(userId),
       ]);
-
-      setSubjects(normalizeSubjects(subjectData));
+      setSubjects(subjectData);
       setTimetable(normalizeTimetable(timetableData));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load planning data");
+      setError(e instanceof Error ? e.message : "Failed to load data");
     } finally {
       setLoadingRecovery(false);
+    }
+  }
+
+  async function handleRun() {
+    if (!appUser) return;
+
+    try {
+      setError("");
+      setBunkResult(null);
+
+      let res: any;
+
+      if (mode === "tomorrow") {
+        res = await planBunks({ mode: "tomorrow" }, appUser.id);
+      } else if (mode === "next_n_days") {
+        const parsed = Number(nDays);
+        if (!parsed || parsed <= 0) {
+          setError("Enter number of days.");
+          return;
+        }
+        res = await planBunks({ mode: "next_n_days", n_days: parsed }, appUser.id);
+      } else {
+        const parsedWeeks = Number(weeks || 1);
+        res = await planBunks(
+          {
+            mode: "selected_weekdays",
+            selected_days: selectedDays,
+            weeks: parsedWeeks > 0 ? parsedWeeks : 1,
+          },
+          appUser.id
+        );
+      }
+
+      setBunkResult({
+        scenario_label: res.scenario_label,
+        new_overall: Number(res.new_overall || 0),
+        drop_overall: Number(res.drop_overall || 0),
+        new_avg: Number(res.new_avg || 0),
+        drop_avg: Number(res.drop_avg || 0),
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to run prediction");
     }
   }
 
@@ -148,133 +164,68 @@ export default function PlanPage() {
     );
   }
 
-  function getScenarioDays(): string[] {
-    if (mode === "tomorrow") {
-      return [DAYS[0]];
+  const currentOverall = useMemo(() => calcOverall(subjects), [subjects]);
+  const currentAverage = useMemo(() => calcAverage(subjects), [subjects]);
+
+  function runRecovery() {
+    setError("");
+    setRecoveryResult(null);
+
+    const parsedDays = Number(recoveryDays);
+    if (!parsedDays || parsedDays <= 0) {
+      setError("Enter number of recovery days.");
+      return;
     }
 
-    if (mode === "next_n_days") {
-      const expanded: string[] = [];
-      for (let i = 0; i < nDays; i++) {
-        expanded.push(DAYS[i % DAYS.length]);
-      }
-      return expanded;
+    if (subjects.length === 0) {
+      setError("Add subjects first.");
+      return;
     }
 
-    const expanded: string[] = [];
-    for (let w = 0; w < weeks; w++) {
-      expanded.push(...selectedDays);
+    const dayOrder = DAYS.filter((day) =>
+      (timetable[day] || []).some((s) => String(s || "").trim() !== "")
+    );
+
+    if (dayOrder.length === 0) {
+      setError("Create your schedule first.");
+      return;
     }
-    return expanded;
-  }
 
-  function handleRun() {
-    const scenarioDays = getScenarioDays();
-    const clonedSubjects = subjects.map((s) => ({ ...s }));
-    const subjectMap = new Map(clonedSubjects.map((s) => [s.subject_name, s]));
+    const simulated: Subject[] = subjects.map((s) => ({ ...s }));
 
-    for (const day of scenarioDays) {
+    for (let i = 0; i < parsedDays; i++) {
+      const day = dayOrder[i % dayOrder.length];
       const periods = timetable[day] || [];
 
       for (const subjectName of periods) {
-        if (!subjectName) continue;
+        const clean = String(subjectName || "").trim();
+        if (!clean) continue;
 
-        const subject = subjectMap.get(subjectName);
-        if (!subject) continue;
+        const subject = simulated.find(
+          (s) => s.subject_name.trim().toLowerCase() === clean.toLowerCase()
+        );
 
-        subject.total_classes += 1;
-        subject.attendance_percentage =
-          subject.total_classes > 0
-            ? Number(
-                ((subject.attended_classes / subject.total_classes) * 100).toFixed(1)
-              )
-            : 0;
-      }
-    }
-
-    const current_avg =
-      subjects.length > 0
-        ? subjects.reduce((sum, s) => sum + s.attendance_percentage, 0) / subjects.length
-        : 0;
-
-    const predicted_avg =
-      clonedSubjects.length > 0
-        ? clonedSubjects.reduce((sum, s) => sum + s.attendance_percentage, 0) /
-          clonedSubjects.length
-        : 0;
-
-    setResult({
-      scenario_label:
-        mode === "tomorrow"
-          ? "Absent tomorrow"
-          : mode === "next_n_days"
-          ? `Absent for next ${nDays} class days`
-          : `Absent on ${selectedDays.join(", ")} for ${weeks} week(s)`,
-      current_avg: Number(current_avg.toFixed(1)),
-      predicted_avg: Number(predicted_avg.toFixed(1)),
-      drop: Number((current_avg - predicted_avg).toFixed(1)),
-    });
-  }
-
-  const currentAverage = useMemo(() => {
-    if (subjects.length === 0) return 0;
-    const total = subjects.reduce((sum, s) => sum + s.attendance_percentage, 0);
-    return total / subjects.length;
-  }, [subjects]);
-
-  const dayRecovery = useMemo(() => {
-    if (subjects.length === 0) return [];
-
-    const subjectMap = new Map(subjects.map((s) => [s.subject_name, s]));
-
-    const results = DAYS.map((day) => {
-      const periods = timetable[day] || [];
-      const countedSubjects: string[] = [];
-      let totalGain = 0;
-
-      for (const subjectName of periods) {
-        if (!subjectName) continue;
-
-        const subject = subjectMap.get(subjectName);
-        if (!subject) continue;
-
-        const currentPct =
-          subject.total_classes > 0
-            ? (subject.attended_classes / subject.total_classes) * 100
-            : 0;
-
-        const newPct =
-          ((subject.attended_classes + 1) / (subject.total_classes + 1)) * 100;
-
-        totalGain += newPct - currentPct;
-
-        if (!countedSubjects.includes(subjectName)) {
-          countedSubjects.push(subjectName);
+        if (subject) {
+          subject.attended_classes += 1;
+          subject.total_classes += 1;
         }
       }
+    }
 
-      const averageGain = subjects.length > 0 ? totalGain / subjects.length : 0;
+    const newOverall = calcOverall(simulated);
+    const newAvg = calcAverage(simulated);
 
-      const recoveryHelpSubjects = countedSubjects.filter((name) => {
-        const subject = subjectMap.get(name);
-        return subject && subject.need_to_recover > 0;
-      });
-
-      return {
-        day,
-        gain: averageGain,
-        subjects: recoveryHelpSubjects,
-        currentAverage,
-      };
+    setRecoveryResult({
+      label: `Recovery for ${parsedDays} consecutive days`,
+      new_overall: Number(newOverall.toFixed(2)),
+      increase_overall: Number((newOverall - currentOverall).toFixed(2)),
+      new_avg: Number(newAvg.toFixed(2)),
+      increase_avg: Number((newAvg - currentAverage).toFixed(2)),
     });
-
-    return results.sort((a, b) => b.gain - a.gain);
-  }, [subjects, timetable, currentAverage]);
-
-  const bestRecoveryDay = dayRecovery.length > 0 ? dayRecovery[0] : null;
+  }
 
   if (loadingUser) {
-    return <FullScreenLoader label="Loading..." />;
+    return <FullScreenLoader label="Loading BunkMax..." />;
   }
 
   if (!appUser) {
@@ -283,16 +234,11 @@ export default function PlanPage() {
 
   return (
     <div className="app-shell">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">⚡ Plan My Bunks</h1>
-          <p className="text-sm text-gray-400 mt-1">
-            Predict bunk impact and plan attendance recovery
-          </p>
-        </div>
-        <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-gray-300">
-          Plan
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Plan My Bunks</h1>
+        <p className="text-sm text-gray-400 mt-1">
+          Predict bunk impact and plan attendance recovery
+        </p>
       </div>
 
       {error && (
@@ -344,9 +290,9 @@ export default function PlanPage() {
               <input
                 type="number"
                 value={nDays}
-                onChange={(e) => setNDays(Number(e.target.value) || 1)}
+                onChange={(e) => setNDays(e.target.value)}
                 className="input-ui"
-                placeholder="Number of days"
+                placeholder="Enter number"
               />
             )}
 
@@ -372,9 +318,9 @@ export default function PlanPage() {
                 <input
                   type="number"
                   value={weeks}
-                  onChange={(e) => setWeeks(Number(e.target.value) || 1)}
+                  onChange={(e) => setWeeks(e.target.value)}
                   className="input-ui"
-                  placeholder="Weeks"
+                  placeholder="Enter number"
                 />
               </>
             )}
@@ -384,26 +330,29 @@ export default function PlanPage() {
             </button>
           </div>
 
-          {result && (
+          {bunkResult && (
             <div className="glass-card p-4 space-y-3">
-              <p className="font-semibold">{result.scenario_label}</p>
+              <p className="font-semibold">{bunkResult.scenario_label}</p>
 
-              <div className="grid grid-cols-3 gap-2">
-                <MiniMetric title="Current" value={`${result.current_avg.toFixed(2)}%`} />
-                <MiniMetric title="Predicted" value={`${result.predicted_avg.toFixed(2)}%`} />
-                <MiniMetric title="Drop" value={`${result.drop.toFixed(2)}%`} />
-              </div>
-
-              <div
-                className={`rounded-xl border p-2 text-sm ${
-                  result.predicted_avg >= 75
-                    ? "border-green-500/30 bg-green-500/10 text-green-200"
-                    : "border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
-                }`}
-              >
-                {result.predicted_avg >= 75
-                  ? "Still safe after this bunk plan ✅"
-                  : "This bunk plan may push your attendance down ⚠️"}
+              <div className="grid grid-cols-2 gap-2">
+                <MiniStatCard
+                  title="New Overall"
+                  value={`${bunkResult.new_overall.toFixed(2)}%`}
+                  sub={`Drop ${bunkResult.drop_overall.toFixed(2)}%`}
+                />
+                <MiniStatCard
+                  title="Drop in Overall"
+                  value={`${bunkResult.drop_overall.toFixed(2)}%`}
+                />
+                <MiniStatCard
+                  title="New Avg"
+                  value={`${bunkResult.new_avg.toFixed(2)}%`}
+                  sub={`Drop ${bunkResult.drop_avg.toFixed(2)}%`}
+                />
+                <MiniStatCard
+                  title="Drop in Avg"
+                  value={`${bunkResult.drop_avg.toFixed(2)}%`}
+                />
               </div>
             </div>
           )}
@@ -418,47 +367,46 @@ export default function PlanPage() {
             </div>
           ) : (
             <>
-              {bestRecoveryDay && (
-                <div className="rounded-2xl border border-green-500/30 bg-green-500/10 p-4 text-green-200">
-                  <p className="font-semibold">Best day to recover attendance</p>
-                  <p className="mt-1 text-sm">
-                    Attending <span className="font-semibold">{bestRecoveryDay.day}</span> can improve your
-                    overall average by about{" "}
-                    <span className="font-semibold">{bestRecoveryDay.gain.toFixed(2)}%</span>.
-                  </p>
+              <div className="soft-card p-4 space-y-3">
+                <input
+                  type="number"
+                  value={recoveryDays}
+                  onChange={(e) => setRecoveryDays(e.target.value)}
+                  className="input-ui"
+                  placeholder="Enter number of days"
+                />
+
+                <button onClick={runRecovery} className="primary-btn">
+                  Calculate Recovery
+                </button>
+              </div>
+
+              {recoveryResult && (
+                <div className="glass-card p-4 space-y-3">
+                  <p className="font-semibold">{recoveryResult.label}</p>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <MiniStatCard
+                      title="New Overall"
+                      value={`${recoveryResult.new_overall.toFixed(2)}%`}
+                      sub={`+${recoveryResult.increase_overall.toFixed(2)}%`}
+                    />
+                    <MiniStatCard
+                      title="Increase in Overall"
+                      value={`+${recoveryResult.increase_overall.toFixed(2)}%`}
+                    />
+                    <MiniStatCard
+                      title="New Avg"
+                      value={`${recoveryResult.new_avg.toFixed(2)}%`}
+                      sub={`+${recoveryResult.increase_avg.toFixed(2)}%`}
+                    />
+                    <MiniStatCard
+                      title="Increase in Avg"
+                      value={`+${recoveryResult.increase_avg.toFixed(2)}%`}
+                    />
+                  </div>
                 </div>
               )}
-
-              <div className="section-title">Recovery by Day</div>
-
-              <div className="space-y-3">
-                {dayRecovery.map((day) => (
-                  <div key={day.day} className="glass-card p-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="font-semibold">{day.day}</p>
-                      </div>
-
-                      <div className="rounded-xl border border-green-500/30 bg-green-500/10 px-3 py-2 text-sm text-green-200">
-                        +{day.gain.toFixed(2)}%
-                      </div>
-                    </div>
-
-                    <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-gray-300">
-                      {day.subjects.length > 0 ? (
-                        <>
-                          Helps recover:{" "}
-                          <span className="font-semibold">
-                            {day.subjects.join(", ")}
-                          </span>
-                        </>
-                      ) : (
-                        <>This day mainly helps maintain already safe subjects.</>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
             </>
           )}
         </>
@@ -469,17 +417,20 @@ export default function PlanPage() {
   );
 }
 
-function MiniMetric({
+function MiniStatCard({
   title,
   value,
+  sub,
 }: {
   title: string;
   value: string;
+  sub?: string;
 }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-center">
+    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
       <p className="text-[11px] text-gray-400">{title}</p>
-      <p className="text-sm font-bold mt-1">{value}</p>
+      <p className="text-lg font-bold mt-1">{value}</p>
+      {sub ? <p className="text-[11px] text-gray-400 mt-1">{sub}</p> : null}
     </div>
   );
 }

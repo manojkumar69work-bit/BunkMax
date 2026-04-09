@@ -1,60 +1,51 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import { getSubjects, getTimetable, saveTimetable } from "@/lib/api";
-import FullScreenLoader from "@/components/FullScreenLoader";
 import { useAppUser } from "@/lib/user";
+import FullScreenLoader from "@/components/FullScreenLoader";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const PERIODS = 6;
 
+type SubjectItem = {
+  subject_name: string;
+};
+
 type TimetableMap = Record<string, string[]>;
 
-function normalizeTimetable(input: any): TimetableMap {
-  const empty: TimetableMap = Object.fromEntries(
-    DAYS.map((day) => [day, Array(PERIODS).fill("")])
-  ) as TimetableMap;
+function normalizeTimetable(data: any): TimetableMap {
+  if (!data) return {};
 
-  if (!input) return empty;
-
-  if (!Array.isArray(input) && typeof input === "object") {
-    const result: TimetableMap = { ...empty };
-
-    for (const day of DAYS) {
-      const arr = Array.isArray(input[day]) ? input[day] : [];
-      result[day] = Array.from({ length: PERIODS }, (_, i) => arr[i] || "");
-    }
-
-    return result;
+  if (!Array.isArray(data)) {
+    return data;
   }
 
-  if (Array.isArray(input)) {
-    const result: TimetableMap = { ...empty };
+  const map: TimetableMap = {};
 
-    for (const row of input) {
-      const day = row.day_name;
-      const periodIndex = Number(row.period_no) - 1;
-      const subject = row.subject_name || "";
+  for (const row of data) {
+    const day = row.day_name;
+    const periodIndex = Number(row.period_no) - 1;
+    const subject = row.subject_name || "";
 
-      if (DAYS.includes(day) && periodIndex >= 0 && periodIndex < PERIODS) {
-        result[day][periodIndex] = subject;
-      }
+    if (!map[day]) {
+      map[day] = Array(PERIODS).fill("");
     }
 
-    return result;
+    if (periodIndex >= 0 && periodIndex < PERIODS) {
+      map[day][periodIndex] = subject;
+    }
   }
 
-  return empty;
+  return map;
 }
 
 export default function SchedulePage() {
   const { appUser, loadingUser } = useAppUser();
 
   const [subjects, setSubjects] = useState<string[]>([]);
-  const [timetable, setTimetable] = useState<TimetableMap>(
-    normalizeTimetable(null)
-  );
+  const [timetable, setTimetable] = useState<TimetableMap>({});
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -69,19 +60,14 @@ export default function SchedulePage() {
     try {
       setLoading(true);
       setError("");
+      setMessage("");
 
       const [subjectData, timetableData] = await Promise.all([
         getSubjects(userId),
         getTimetable(userId),
       ]);
 
-      const subjectNames = Array.isArray(subjectData)
-        ? subjectData
-            .map((s: any) => s?.subject_name)
-            .filter((name: string) => !!name && name.trim() !== "")
-        : [];
-
-      setSubjects(subjectNames);
+      setSubjects(subjectData.map((s: SubjectItem) => s.subject_name));
       setTimetable(normalizeTimetable(timetableData));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load schedule");
@@ -125,9 +111,19 @@ export default function SchedulePage() {
 
   const currentDayPeriods = timetable[selectedDay] || Array(PERIODS).fill("");
 
-  
+  const daySubjectCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+
+    for (const day of DAYS) {
+      const arr = timetable[day] || [];
+      counts[day] = arr.filter((item) => String(item || "").trim() !== "").length;
+    }
+
+    return counts;
+  }, [timetable]);
+
   if (loadingUser) {
-    return <FullScreenLoader label="Loading..." />;
+    return <FullScreenLoader label="Loading BunkMax..." />;
   }
 
   if (!appUser) {
@@ -136,16 +132,11 @@ export default function SchedulePage() {
 
   return (
     <div className="app-shell">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">🗓 My Schedule</h1>
-          <p className="text-sm text-gray-400 mt-1">
-            Select a day and edit its periods
-          </p>
-        </div>
-        <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-gray-300">
-          Schedule
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">My Schedule</h1>
+        <p className="text-sm text-gray-400 mt-1">
+          Select a day and edit its periods
+        </p>
       </div>
 
       {error && (
@@ -173,6 +164,7 @@ export default function SchedulePage() {
           <div className="grid grid-cols-2 gap-3">
             {DAYS.map((day) => {
               const active = selectedDay === day;
+              const count = daySubjectCounts[day] || 0;
 
               return (
                 <button
@@ -189,7 +181,9 @@ export default function SchedulePage() {
                   }`}
                 >
                   <div className="font-semibold">{day}</div>
-                  <div className="text-xs text-gray-400 mt-1">Tap to edit</div>
+                  <div className="text-xs text-gray-400 mt-1">
+                    {count} {count === 1 ? "subject" : "subjects"}
+                  </div>
                 </button>
               );
             })}
@@ -199,7 +193,7 @@ export default function SchedulePage() {
 
           <div className="soft-card p-4 space-y-3">
             {Array.from({ length: PERIODS }).map((_, i) => (
-              <div key={`${selectedDay}-${i}`} className="space-y-1">
+              <div key={i} className="space-y-1">
                 <label className="text-xs text-gray-400">Period {i + 1}</label>
                 <select
                   value={currentDayPeriods[i] || ""}
@@ -207,8 +201,8 @@ export default function SchedulePage() {
                   className="input-ui"
                 >
                   <option value="">Select subject</option>
-                  {subjects.map((subject, idx) => (
-                    <option key={`${subject}-${idx}`} value={subject}>
+                  {subjects.map((subject) => (
+                    <option key={subject} value={subject}>
                       {subject}
                     </option>
                   ))}

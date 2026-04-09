@@ -1,16 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import Link from "next/link";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, getTomorrow, getBestDay, getWorstDay, markAttendance } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
-import {
-  getTomorrow,
-  getBestDay,
-  getWorstDay,
-  markAttendance,
-} from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 
 type DashboardData = {
@@ -31,6 +25,14 @@ type HomeSubject = {
   total_classes: number;
 };
 
+type QuickResult = {
+  title: string;
+  new_overall: number;
+  new_avg: number;
+  drop_overall: number;
+  drop_avg: number;
+};
+
 export default function Home() {
   const { appUser, loadingUser } = useAppUser();
 
@@ -39,9 +41,11 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [markingKey, setMarkingKey] = useState<string>("");
-  const [tomorrow, setTomorrow] = useState<any>(null);
-  const [best, setBest] = useState<any>(null);
-  const [worst, setWorst] = useState<any>(null);
+
+  const [tomorrow, setTomorrow] = useState<QuickResult | null>(null);
+  const [best, setBest] = useState<QuickResult | null>(null);
+  const [worst, setWorst] = useState<QuickResult | null>(null);
+
   const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
 
   useEffect(() => {
@@ -54,17 +58,6 @@ export default function Home() {
       setLoading(true);
       setError("");
 
-      const cacheKey = `bunkmax_home_${userId}`;
-      const cached = sessionStorage.getItem(cacheKey);
-
-      if (cached) {
-        const homeData = JSON.parse(cached);
-        setData(homeData.dashboard);
-        setSubjects(homeData.subjects);
-        setLoading(false);
-        return;
-      }
-
       const res = await fetch(`${API_BASE}/users/${userId}/home-data`);
 
       if (!res.ok) {
@@ -73,9 +66,6 @@ export default function Home() {
       }
 
       const homeData = await res.json();
-
-      sessionStorage.setItem(cacheKey, JSON.stringify(homeData));
-
       setData(homeData.dashboard);
       setSubjects(homeData.subjects);
     } catch (e) {
@@ -84,6 +74,7 @@ export default function Home() {
       setLoading(false);
     }
   }
+
   async function runTomorrow() {
     if (!appUser) return;
     try {
@@ -240,23 +231,6 @@ export default function Home() {
           };
         });
 
-        if (appUser) {
-          const cacheKey = `bunkmax_home_${appUser.id}`;
-          sessionStorage.setItem(
-            cacheKey,
-            JSON.stringify({
-              dashboard: {
-                current_avg: currentAvg,
-                overall_percentage: overallPct,
-                total_present: newTotalPresent,
-                total_absent: newTotalAbsent,
-                today_classes: updatedTodayClasses,
-              },
-              subjects: updatedSubjects,
-            })
-          );
-        }
-
         return updatedSubjects;
       });
     } catch (e) {
@@ -265,14 +239,22 @@ export default function Home() {
       setMarkingKey("");
     }
   }
- 
+
   function getSubjectCounts(subjectName: string) {
     const subject = subjects.find((s) => s.subject_name === subjectName);
     if (!subject) return null;
     return `${subject.attended_classes}/${subject.total_classes}`;
   }
 
-  
+  const safeDaysLeft = useMemo(() => {
+    if (!data) return 0;
+    const present = data.total_present;
+    const total = data.total_present + data.total_absent;
+    const req = 0.75;
+    if (total <= 0) return 0;
+    if ((present / total) < req) return 0;
+    return Math.max(0, Math.floor(present / req - total));
+  }, [data]);
 
   if (loadingUser) {
     return <FullScreenLoader label="Loading BunkMax..." />;
@@ -299,14 +281,9 @@ export default function Home() {
 
   return (
     <div className="app-shell">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">📘 BunkMax</h1>
-          <p className="text-sm text-gray-400 mt-1">No Shocks at Semester End.</p>
-        </div>
-        <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-gray-300">
-          Home
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">BunkMax</h1>
+        <p className="text-sm text-gray-400 mt-1">No Shocks at Semester End.</p>
       </div>
 
       {error && (
@@ -319,14 +296,13 @@ export default function Home() {
         <div className="text-sm text-gray-400">Loading dashboard...</div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3">
-            <MetricCard title="Average" value={formatPercent(data.current_avg)} />
-            <MetricCard title="Overall" value={formatPercent(data.overall_percentage)} />
-            <MetricCard title="Present" value={`${data.total_present}`} />
-            <MetricCard title="Absent" value={`${data.total_absent}`} />
-          </div>
-
-          
+          <StatsOverview
+            overall={data.overall_percentage}
+            avg={data.current_avg}
+            present={data.total_present}
+            absent={data.total_absent}
+            safeDaysLeft={safeDaysLeft}
+          />
 
           <div className="glass-card p-4">
             <div className="flex items-center justify-between gap-3">
@@ -353,7 +329,6 @@ export default function Home() {
             buttonText={busy === "tomorrow" ? "Checking..." : "Check Tomorrow"}
             onClick={runTomorrow}
             result={tomorrow}
-            type="normal"
           />
 
           <QuickCard
@@ -362,7 +337,6 @@ export default function Home() {
             buttonText={busy === "best" ? "Finding..." : "Find Best Day"}
             onClick={runBest}
             result={best}
-            type="best"
           />
 
           <QuickCard
@@ -371,10 +345,7 @@ export default function Home() {
             buttonText={busy === "worst" ? "Finding..." : "Find Worst Day"}
             onClick={runWorst}
             result={worst}
-            type="worst"
           />
-
-
 
           <div className="section-title">Today&apos;s Classes</div>
 
@@ -454,34 +425,84 @@ export default function Home() {
   );
 }
 
-function MetricCard({
-  title,
-  value,
+function StatsOverview({
+  overall,
+  avg,
+  present,
+  absent,
+  safeDaysLeft,
 }: {
-  title: string;
-  value: string;
+  overall: number;
+  avg: number;
+  present: number;
+  absent: number;
+  safeDaysLeft: number;
 }) {
   return (
-    <div className="glass-card p-4">
-      <p className="metric-title">{title}</p>
-      <p className="metric-value">{value}</p>
+    <div className="grid grid-cols-2 gap-3 items-stretch">
+      <div className="glass-card p-4 row-span-2 min-h-[220px] flex flex-col items-center justify-center">
+        <DonutChart percentage={overall} />
+        <p className="mt-4 text-base font-semibold text-white">
+          {safeDaysLeft} days left
+        </p>
+      </div>
+
+      <div className="glass-card p-4 min-h-[104px] flex flex-col justify-center">
+        <p className="metric-title">Average</p>
+        <p className="metric-value">{formatPercent(avg)}</p>
+      </div>
+
+      <div className="glass-card p-4 min-h-[104px] flex items-center">
+        <div className="grid grid-cols-2 gap-6 w-full">
+          <div>
+            <p className="metric-title">Present</p>
+            <p className="metric-value">{present}</p>
+          </div>
+          <div>
+            <p className="metric-title">Absent</p>
+            <p className="metric-value">{absent}</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
+
+function DonutChart({ percentage }: { percentage: number }) {
+  const value = Math.max(0, Math.min(100, percentage));
+
+  return (
+    <div className="relative h-36 w-36 flex items-center justify-center">
+      <div
+        className="absolute inset-0 rounded-full"
+        style={{
+          background: `conic-gradient(
+            #3b82f6 0% ${value}%,
+            rgba(255,255,255,0.14) ${value}% 100%
+          )`,
+        }}
+      />
+      <div className="absolute inset-[14px] rounded-full bg-[#0f172a]" />
+      <div className="absolute inset-[18px] rounded-full border border-white/10 flex flex-col items-center justify-center text-center">
+        <p className="text-[11px] text-gray-400">Overall</p>
+        <p className="text-2xl font-bold mt-1">{formatPercent(value)}</p>
+      </div>
+    </div>
+  );
+}
+
 function QuickCard({
   title,
   desc,
   buttonText,
   onClick,
   result,
-  type,
 }: {
   title: string;
   desc: string;
   buttonText: string;
   onClick: () => void;
-  result: any;
-  type: "normal" | "best" | "worst";
+  result: QuickResult | null;
 }) {
   return (
     <div className="soft-card p-4 space-y-3">
@@ -498,26 +519,17 @@ function QuickCard({
         <div className="glass-card p-4 space-y-3">
           <p className="font-semibold">{result.title}</p>
 
-          <div className="grid grid-cols-3 gap-2">
-            <MiniMetric title="Current" value={`${Number(result.current || 0).toFixed(1)}%`} />
-            <MiniMetric title="New" value={`${Number(result.new || 0).toFixed(1)}%`} />
-            <MiniMetric title="Drop" value={`${Number(result.drop || 0).toFixed(1)}%`} />
-          </div>
-
-          <div
-            className={`rounded-xl border p-2 text-sm ${
-              type === "worst"
-                ? "border-red-500/30 bg-red-500/10 text-red-200"
-                : result.safe
-                ? "border-green-500/30 bg-green-500/10 text-green-200"
-                : "border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
-            }`}
-          >
-            {type === "worst"
-              ? "Avoid skipping on this day ❌"
-              : result.safe
-              ? "Safe to skip ✅"
-              : "Not safe to skip ⚠️"}
+          <div className="grid grid-cols-2 gap-3">
+            <ActionMetricCard
+              title="New Overall"
+              value={formatPercent(result?.new_overall)}
+              dropLabel={`Drop: ${formatPercent(result.drop_overall)}`}
+            />
+            <ActionMetricCard
+              title="New Avg"
+              value={formatPercent(result.new_avg)}
+              dropLabel={`Drop: ${formatPercent(result.drop_avg)}`}
+            />
           </div>
         </div>
       )}
@@ -525,20 +537,27 @@ function QuickCard({
   );
 }
 
-function MiniMetric({
+function ActionMetricCard({
   title,
   value,
+  dropLabel,
 }: {
   title: string;
   value: string;
+  dropLabel: string;
 }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-center">
-      <p className="text-[11px] text-gray-400">{title}</p>
-      <p className="text-sm font-bold mt-1">{value}</p>
+    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+      <p className="text-xs text-gray-400">{title}</p>
+      <p className="text-2xl font-bold mt-2">{value}</p>
+      <p className="text-xs text-gray-400 mt-2">{dropLabel}</p>
     </div>
   );
 }
-function formatPercent(value: number) {
+
+function formatPercent(value: number | undefined) {
+  if (value === undefined || value === null || isNaN(value)) {
+    return "0.00%";
+  }
   return `${Number(value.toFixed(2))}%`;
 }

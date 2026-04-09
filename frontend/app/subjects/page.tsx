@@ -3,67 +3,19 @@
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import { deleteSubject, getSubjects, saveSubject } from "@/lib/api";
-import FullScreenLoader from "@/components/FullScreenLoader";
 import { useAppUser } from "@/lib/user";
+import FullScreenLoader from "@/components/FullScreenLoader";
 
 type Subject = {
   id: number;
   subject_name: string;
   attended_classes: number;
   total_classes: number;
-  required_percentage: number;
-  attendance_percentage: number;
-  safe_bunks: number;
-  need_to_recover: number;
-  status: string;
+  required_percentage?: number;
 };
 
-function recalculateSubject(subject: Partial<Subject>): Subject {
-  const id = Number(subject.id ?? 0);
-  const subject_name = String(subject.subject_name ?? "");
-  const attended_classes = Number(subject.attended_classes ?? 0);
-  const total_classes = Number(subject.total_classes ?? 0);
-  const required_percentage = Number(subject.required_percentage ?? 75);
-
-  const attendance_percentage =
-    total_classes > 0
-      ? Number(((attended_classes / total_classes) * 100).toFixed(2))
-      : 0;
-
-  let status = "Danger";
-  if (attendance_percentage >= required_percentage + 5) {
-    status = "Safe";
-  } else if (attendance_percentage >= required_percentage) {
-    status = "Warning";
-  }
-
-  let safe_bunks = 0;
-  if (total_classes > 0 && attendance_percentage >= required_percentage) {
-    const req = required_percentage / 100;
-    safe_bunks = Math.max(
-      0,
-      Math.floor(attended_classes / req - total_classes)
-    );
-  }
-
-  let need_to_recover = 0;
-  if (attendance_percentage < required_percentage) {
-    const req = required_percentage / 100;
-    const x = ((req * total_classes) - attended_classes) / (1 - req);
-    need_to_recover = Math.max(0, Math.ceil(x));
-  }
-
-  return {
-    id,
-    subject_name,
-    attended_classes,
-    total_classes,
-    required_percentage,
-    attendance_percentage,
-    safe_bunks,
-    need_to_recover,
-    status,
-  };
+function calculateAttendance(attended: number, total: number) {
+  return total > 0 ? Number(((attended / total) * 100).toFixed(1)) : 0;
 }
 
 export default function SubjectsPage() {
@@ -92,9 +44,7 @@ export default function SubjectsPage() {
       setLoading(true);
       setError("");
       const data = await getSubjects(userId);
-      setSubjects(
-        Array.isArray(data) ? data.map((s: any) => recalculateSubject(s)) : []
-      );
+      setSubjects(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load subjects");
     } finally {
@@ -111,6 +61,14 @@ export default function SubjectsPage() {
       return;
     }
 
+    const attended = Number(form.attended_classes || 0);
+    const total = Number(form.total_classes || 0);
+
+    if (attended > total) {
+      setError("Present classes cannot be greater than total classes.");
+      return;
+    }
+
     setError("");
     setMessage("");
 
@@ -118,8 +76,8 @@ export default function SubjectsPage() {
       await saveSubject(
         {
           subject_name: form.subject_name.trim(),
-          attended_classes: Number(form.attended_classes || 0),
-          total_classes: Number(form.total_classes || 0),
+          attended_classes: attended,
+          total_classes: total,
           required_percentage: Number(form.required_percentage || 75),
         },
         appUser.id
@@ -186,7 +144,7 @@ export default function SubjectsPage() {
           subject_name: subject.subject_name,
           attended_classes: newAttended,
           total_classes: newTotal,
-          required_percentage: subject.required_percentage,
+          required_percentage: subject.required_percentage ?? 75,
         },
         appUser.id
       );
@@ -194,11 +152,11 @@ export default function SubjectsPage() {
       setSubjects((prev) =>
         prev.map((s) =>
           s.id === subject.id
-            ? recalculateSubject({
+            ? {
                 ...s,
                 attended_classes: newAttended,
                 total_classes: newTotal,
-              })
+              }
             : s
         )
       );
@@ -212,7 +170,7 @@ export default function SubjectsPage() {
   }
 
   if (loadingUser) {
-    return <FullScreenLoader label="Loading..." />;
+    return <FullScreenLoader label="Loading BunkMax..." />;
   }
 
   if (!appUser) {
@@ -221,16 +179,11 @@ export default function SubjectsPage() {
 
   return (
     <div className="app-shell">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">📚 My Subjects</h1>
-          <p className="text-sm text-gray-400 mt-1">
-            Manage attendance for each subject
-          </p>
-        </div>
-        <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-gray-300">
-          Subjects
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">My Subjects</h1>
+        <p className="text-sm text-gray-400 mt-1">
+          Manage attendance for each subject
+        </p>
       </div>
 
       {error && (
@@ -283,7 +236,10 @@ export default function SubjectsPage() {
           placeholder="Required % (default 75)"
           value={form.required_percentage}
           onChange={(e) =>
-            setForm({ ...form, required_percentage: Number(e.target.value) || 75 })
+            setForm({
+              ...form,
+              required_percentage: Number(e.target.value) || 75,
+            })
           }
         />
 
@@ -300,89 +256,79 @@ export default function SubjectsPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {subjects.map((subject, index) => (
-            <div
-              key={`${subject.id ?? "noid"}-${subject.subject_name}-${index}`}
-              className="glass-card p-4"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="font-semibold text-base">{subject.subject_name}</p>
-                  <p className="text-sm text-gray-400 mt-1">
-                    Attendance: {subject.attendance_percentage.toFixed(1)}%
-                  </p>
+          {subjects.map((subject, index) => {
+            const attendance = calculateAttendance(
+              subject.attended_classes,
+              subject.total_classes
+            );
+
+            return (
+              <div
+                key={`${subject.id ?? "noid"}-${subject.subject_name}-${index}`}
+                className="glass-card p-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-base">
+                      {subject.subject_name}
+                    </p>
+                    <p className="text-sm text-gray-400 mt-2">
+                      Attendance: {attendance}%
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(subject.id)}
+                    className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-200"
+                  >
+                    Delete
+                  </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => handleDelete(subject.id)}
-                  className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-200"
-                >
-                  Delete
-                </button>
+                <div className="grid grid-cols-2 gap-3 mt-4">
+                  <CounterCard
+                    title="Present"
+                    value={subject.attended_classes}
+                    disabled={busyId === subject.id}
+                    onMinus={() =>
+                      updateCounts(subject, {
+                        attended: subject.attended_classes - 1,
+                      })
+                    }
+                    onPlus={() =>
+                      updateCounts(subject, {
+                        attended: subject.attended_classes + 1,
+                        total:
+                          subject.attended_classes + 1 > subject.total_classes
+                            ? subject.attended_classes + 1
+                            : subject.total_classes,
+                      })
+                    }
+                  />
+
+                  <CounterCard
+                    title="Total"
+                    value={subject.total_classes}
+                    disabled={busyId === subject.id}
+                    onMinus={() =>
+                      updateCounts(subject, {
+                        total: Math.max(
+                          subject.attended_classes,
+                          subject.total_classes - 1
+                        ),
+                      })
+                    }
+                    onPlus={() =>
+                      updateCounts(subject, {
+                        total: subject.total_classes + 1,
+                      })
+                    }
+                  />
+                </div>
               </div>
-
-              <div className="grid grid-cols-2 gap-3 mt-4">
-                <CounterCard
-                  title="Present"
-                  value={subject.attended_classes}
-                  disabled={busyId === subject.id}
-                  onMinus={() =>
-                    updateCounts(subject, {
-                      attended: subject.attended_classes - 1,
-                    })
-                  }
-                  onPlus={() =>
-                    updateCounts(subject, {
-                      attended: subject.attended_classes + 1,
-                      total:
-                        subject.attended_classes + 1 > subject.total_classes
-                          ? subject.attended_classes + 1
-                          : subject.total_classes,
-                    })
-                  }
-                />
-
-                <CounterCard
-                  title="Total"
-                  value={subject.total_classes}
-                  disabled={busyId === subject.id}
-                  onMinus={() =>
-                    updateCounts(subject, {
-                      total: Math.max(
-                        subject.attended_classes,
-                        subject.total_classes - 1
-                      ),
-                    })
-                  }
-                  onPlus={() =>
-                    updateCounts(subject, {
-                      total: subject.total_classes + 1,
-                    })
-                  }
-                />
-
-                <MiniInfo title="Safe Bunks" value={`${subject.safe_bunks}`} />
-                <MiniInfo title="Recover Needed" value={`${subject.need_to_recover}`} />
-              </div>
-
-              <div className="mt-4">
-                {subject.status === "Safe" ? (
-                  <div className="rounded-xl border border-green-500/30 bg-green-500/10 p-2 text-sm text-green-200">
-                    Safe
-                  </div>
-                ) : subject.status === "Warning" ? (
-                  <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2 text-sm text-yellow-200">
-                    Warning
-                  </div>
-                ) : (
-                  <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-2 text-sm text-red-200">
-                    Danger
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -431,21 +377,6 @@ function CounterCard({
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-function MiniInfo({
-  title,
-  value,
-}: {
-  title: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-      <p className="text-xs text-gray-400">{title}</p>
-      <p className="text-sm font-bold mt-1">{value}</p>
     </div>
   );
 }

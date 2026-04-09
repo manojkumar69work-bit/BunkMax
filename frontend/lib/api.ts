@@ -33,10 +33,29 @@ async function handleResponse<T>(res: Response): Promise<T> {
 
 export async function getUser(userId: number) {
   const res = await fetch(`${API_BASE}/users/${userId}`);
-  return handleResponse<any>(res);
+  return handleResponse<{
+    id: number;
+    name: string;
+    email?: string;
+    college: string;
+    branch: string;
+    semester: string;
+    section: string;
+    default_target: number;
+  }>(res);
 }
 
-export async function updateUser(payload: any, userId: number) {
+export async function updateUser(
+  payload: {
+    name: string;
+    college: string;
+    branch: string;
+    semester: string;
+    section: string;
+    default_target: number;
+  },
+  userId: number
+) {
   const res = await fetch(`${API_BASE}/users/${userId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -58,22 +77,72 @@ export async function clearAllUserData(userId: number) {
 
 export async function getDashboard(userId: number) {
   const res = await fetch(`${API_BASE}/users/${userId}/dashboard`);
-  return handleResponse<any>(res);
+  return handleResponse<{
+    current_avg: number;
+    overall_percentage: number;
+    total_present: number;
+    total_absent: number;
+    today_classes: {
+      period_no: number;
+      subject_name: string;
+      marked_status?: "present" | "absent" | null;
+    }[];
+  }>(res);
+}
+
+export async function getHomeData(userId: number) {
+  const res = await fetch(`${API_BASE}/users/${userId}/home-data`);
+  return handleResponse<{
+    dashboard: {
+      current_avg: number;
+      overall_percentage: number;
+      total_present: number;
+      total_absent: number;
+      today_classes: {
+        period_no: number;
+        subject_name: string;
+        marked_status?: "present" | "absent" | null;
+      }[];
+    };
+    subjects: {
+      subject_name: string;
+      attended_classes: number;
+      total_classes: number;
+    }[];
+  }>(res);
 }
 
 export async function getTomorrow(userId: number) {
   const res = await fetch(`${API_BASE}/users/${userId}/tomorrow`);
-  return handleResponse<any>(res);
+  return handleResponse<{
+    title: string;
+    new_overall: number;
+    drop_overall: number;
+    new_avg: number;
+    drop_avg: number;
+  }>(res);
 }
 
 export async function getBestDay(userId: number) {
   const res = await fetch(`${API_BASE}/users/${userId}/best-day`);
-  return handleResponse<any>(res);
+  return handleResponse<{
+    title: string;
+    new_overall: number;
+    drop_overall: number;
+    new_avg: number;
+    drop_avg: number;
+  }>(res);
 }
 
 export async function getWorstDay(userId: number) {
   const res = await fetch(`${API_BASE}/users/${userId}/worst-day`);
-  return handleResponse<any>(res);
+  return handleResponse<{
+    title: string;
+    new_overall: number;
+    drop_overall: number;
+    new_avg: number;
+    drop_avg: number;
+  }>(res);
 }
 
 export async function markAttendance(
@@ -140,20 +209,6 @@ export async function saveSubject(
   return handleResponse<{ message: string }>(res);
 }
 
-export async function updateSubject(
-  subjectId: number,
-  payload: any,
-  userId: number
-) {
-  const res = await fetch(`${API_BASE}/users/${userId}/subjects/${subjectId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  return handleResponse<{ message: string }>(res);
-}
-
 export async function deleteSubject(subjectId: number, userId: number) {
   const res = await fetch(`${API_BASE}/users/${userId}/subjects/${subjectId}`, {
     method: "DELETE",
@@ -188,28 +243,6 @@ export async function saveSchedule(payload: any, userId: number) {
   return handleResponse<{ message: string }>(res);
 }
 
-export async function updateScheduleItem(
-  itemId: number,
-  payload: any,
-  userId: number
-) {
-  const res = await fetch(`${API_BASE}/users/${userId}/schedule/${itemId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  return handleResponse<{ message: string }>(res);
-}
-
-export async function deleteScheduleItem(itemId: number, userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/schedule/${itemId}`, {
-    method: "DELETE",
-  });
-
-  return handleResponse<{ message: string }>(res);
-}
-
 /* ---------------- BACKWARD COMPATIBILITY ---------------- */
 
 export async function getTimetable(userId: number) {
@@ -220,14 +253,28 @@ export async function saveTimetable(payload: any, userId: number) {
   return saveSchedule(payload, userId);
 }
 
-export async function updateTimetable(
-  itemId: number,
-  payload: any,
+/* ---------------- PLAN ---------------- */
+
+export async function planBunks(
+  payload: {
+    mode: "tomorrow" | "next_n_days" | "selected_weekdays";
+    n_days?: number;
+    weeks?: number;
+    selected_days?: string[];
+  },
   userId: number
 ) {
-  return updateScheduleItem(itemId, payload, userId);
-}
+  const res = await fetch(`${API_BASE}/users/${userId}/plan-bunks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 
-export async function deleteTimetable(itemId: number, userId: number) {
-  return deleteScheduleItem(itemId, userId);
+  return handleResponse<{
+    scenario_label: string;
+    new_overall: number;
+    drop_overall: number;
+    new_avg: number;
+    drop_avg: number;
+  }>(res);
 }
