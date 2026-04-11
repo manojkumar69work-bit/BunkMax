@@ -8,7 +8,6 @@ import BottomNav from "@/components/BottomNav";
 type PreviewRow = {
   subjectid: string;
   subject_name: string;
-  course_type: "Theory" | "Practical";
   attended: number;
   total: number;
   percentage: number;
@@ -68,8 +67,7 @@ function parsePercentageSection(text: string): PercentageRow[] {
   while (i < lines.length) {
     const line = lines[i];
 
-    const isPercent = /^\d+(\.\d+)?%$/.test(line);
-    if (isPercent) {
+    if (/^\d+(\.\d+)?%$/.test(line)) {
       i++;
       continue;
     }
@@ -184,13 +182,11 @@ function buildPreviewRows(text: string): PreviewRow[] {
 
     const percentage = matched ? matched.percentage : 0;
     const total = Number(session.total || 0);
-    const attended =
-      total > 0 ? Math.round((percentage / 100) * total) : 0;
+    const attended = total > 0 ? Math.round((percentage / 100) * total) : 0;
 
     preview.push({
       subjectid: String(preview.length + 1),
       subject_name: session.subject_name,
-      course_type: session.course_type,
       attended,
       total,
       percentage,
@@ -224,7 +220,7 @@ export default function ImportPage() {
       }
 
       setPreviewRows(rows);
-      setMessage("Preview ready ✅");
+      setMessage(" ");
     } catch {
       setError("Failed to parse data");
       setPreviewRows([]);
@@ -237,21 +233,43 @@ export default function ImportPage() {
     value: string | number
   ) {
     const updated = [...previewRows];
+    const row = { ...updated[index] };
 
-    if (field === "subject_name" || field === "course_type") {
-      updated[index][field] = value as never;
-    } else {
-      updated[index][field] = Number(value) as never;
+    if (field === "subject_name") {
+      row.subject_name = String(value);
+    } else if (field === "attended") {
+      row.attended = Number(value);
+      row.percentage =
+        row.total > 0 ? Number(((row.attended / row.total) * 100).toFixed(2)) : 0;
+    } else if (field === "total") {
+      row.total = Number(value);
+      row.percentage =
+        row.total > 0 ? Number(((row.attended / row.total) * 100).toFixed(2)) : 0;
+    } else if (field === "percentage") {
+      row.percentage = Number(value);
+      row.attended =
+        row.total > 0 ? Math.round((row.percentage / 100) * row.total) : 0;
     }
 
-    if (field === "attended" || field === "total" || field === "percentage") {
-      const attended = Number(updated[index].attended || 0);
-      const total = Number(updated[index].total || 0);
-      const percentage = total > 0 ? Number(((attended / total) * 100).toFixed(2)) : 0;
-      updated[index].percentage = percentage;
-    }
-
+    updated[index] = row;
     setPreviewRows(updated);
+  }
+
+  function removeRow(index: number) {
+    setPreviewRows((prev) =>
+      prev
+        .filter((_, i) => i !== index)
+        .map((row, i) => ({
+          ...row,
+          subjectid: String(i + 1),
+        }))
+    );
+
+    if (editingIndex === index) {
+      setEditingIndex(null);
+    } else if (editingIndex !== null && editingIndex > index) {
+      setEditingIndex(editingIndex - 1);
+    }
   }
 
   async function handleImport() {
@@ -265,7 +283,6 @@ export default function ImportPage() {
       const subjects = previewRows.map((row) => ({
         subjectid: row.subjectid,
         subject_name: row.subject_name,
-        subject_type: row.course_type,
       }));
 
       const attendance: Record<string, any> = {};
@@ -280,7 +297,7 @@ export default function ImportPage() {
 
       await importAttendance({ subjects, attendance }, appUser.id);
 
-      setMessage("✅ Attendance imported successfully!");
+      setMessage("Subjects Saved");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Import failed");
     } finally {
@@ -326,17 +343,6 @@ export default function ImportPage() {
                     }
                   />
 
-                  <select
-                    className="input-ui"
-                    value={row.course_type}
-                    onChange={(e) =>
-                      updateRow(index, "course_type", e.target.value)
-                    }
-                  >
-                    <option value="Theory">Theory</option>
-                    <option value="Practical">Practical</option>
-                  </select>
-
                   <div className="flex gap-2">
                     <input
                       className="input-ui"
@@ -369,19 +375,28 @@ export default function ImportPage() {
                     />
                   </div>
 
-                  <button
-                    onClick={() => setEditingIndex(null)}
-                    className="primary-btn"
-                  >
-                    Save
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setEditingIndex(null)}
+                      className="w-1/2 rounded-xl bg-white py-3 font-semibold text-black hover:bg-gray-100"
+                    >
+                      Save
+                    </button>
+
+                    <button
+                      onClick={() => removeRow(index)}
+                      className="w-1/2 rounded-xl border border-red-500/30 bg-red-500/10 py-3 font-semibold text-red-200 hover:bg-red-500/15"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </>
               ) : (
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="font-medium">{row.subject_name}</div>
                     <div className="text-sm text-gray-400">
-                      {row.course_type} • {row.attended}/{row.total} • {row.percentage}%
+                      {row.attended}/{row.total} • {row.percentage}%
                     </div>
                   </div>
 

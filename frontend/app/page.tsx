@@ -287,15 +287,22 @@ export default function Home() {
 
   if (!appUser) {
     return (
-      <div className="app-shell">
-        <div className="glass-card p-5 text-center space-y-3">
-          <h1 className="text-xl font-bold">BunkMax</h1>
-          <p className="text-sm text-gray-400">
-            Please continue from the login page.
+      <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
+        <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">BunkMax</h1>
+            <p className="text-sm text-gray-400 mt-2">
+              Your attendance companion
+            </p>
+          </div>
+
+          <p className="text-sm text-gray-300 leading-relaxed">
+            Please sign in with your MLRIT student account to continue.
           </p>
+
           <a
             href="/login"
-            className="inline-block rounded-xl bg-white px-4 py-2 font-semibold text-black"
+            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/10 bg-gradient-to-b from-white to-gray-200 text-black px-4 py-3 font-semibold hover:from-gray-100 hover:to-gray-300 active:scale-[0.98] transition shadow-lg"
           >
             Go to Login
           </a>
@@ -332,7 +339,7 @@ export default function Home() {
 
     {/* LOADING / CONTENT */}
     {loading || !data ? (
-      <div className="text-sm text-gray-400">Loading dashboard...</div>
+      <FullScreenLoader label="Loading dashboard..." />
     ) : (
       <>
         <StatsOverview

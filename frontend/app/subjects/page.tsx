@@ -35,7 +35,7 @@ export default function SubjectsPage() {
   });
 
   useEffect(() => {
-    if (!appUser) return;
+    if (!appUser?.id) return;
     loadSubjects(appUser.id);
   }, [appUser]);
 
@@ -43,6 +43,7 @@ export default function SubjectsPage() {
     try {
       setLoading(true);
       setError("");
+      setMessage("");
       const data = await getSubjects(userId);
       setSubjects(data);
     } catch (e) {
@@ -54,7 +55,7 @@ export default function SubjectsPage() {
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (!appUser) return;
+    if (!appUser?.id) return;
 
     if (!form.subject_name.trim()) {
       setError("Enter subject name.");
@@ -98,7 +99,7 @@ export default function SubjectsPage() {
   }
 
   async function handleDelete(subjectId: number) {
-    if (!appUser) return;
+    if (!appUser?.id) return;
 
     setError("");
     setMessage("");
@@ -119,7 +120,7 @@ export default function SubjectsPage() {
       total?: number;
     }
   ) {
-    if (!appUser) return;
+    if (!appUser?.id) return;
 
     setError("");
     setMessage("");
@@ -174,7 +175,24 @@ export default function SubjectsPage() {
   }
 
   if (!appUser) {
-    return <div className="app-shell text-sm text-red-300">User not found.</div>;
+    return (
+      <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
+        <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
+          <h1 className="text-2xl font-bold">BunkMax</h1>
+          <p className="text-sm text-gray-300">Please login to continue.</p>
+          <a
+            href="/login"
+            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
+          >
+            Go to Login
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <FullScreenLoader label="Loading subjects..." />;
   }
 
   return (
@@ -248,9 +266,7 @@ export default function SubjectsPage() {
 
       <div className="section-title">Saved Subjects</div>
 
-      {loading ? (
-        <div className="text-sm text-gray-400">Loading subjects...</div>
-      ) : subjects.length === 0 ? (
+      {subjects.length === 0 ? (
         <div className="glass-card p-4 text-sm text-gray-400">
           No subjects added yet.
         </div>

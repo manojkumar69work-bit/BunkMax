@@ -52,7 +52,7 @@ export default function SchedulePage() {
   const [selectedDay, setSelectedDay] = useState("Monday");
 
   useEffect(() => {
-    if (!appUser) return;
+    if (!appUser?.id) return;
     load(appUser.id);
   }, [appUser]);
 
@@ -88,7 +88,7 @@ export default function SchedulePage() {
   }
 
   async function handleSaveDay() {
-    if (!appUser) return;
+    if (!appUser?.id) return;
 
     try {
       setError("");
@@ -127,7 +127,26 @@ export default function SchedulePage() {
   }
 
   if (!appUser) {
-    return <div className="app-shell text-sm text-red-300">User not found.</div>;
+    return (
+      <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
+        <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
+          <h1 className="text-2xl font-bold">BunkMax</h1>
+          <p className="text-sm text-gray-300">
+            Please login to continue.
+          </p>
+          <a
+            href="/login"
+            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
+          >
+            Go to Login
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <FullScreenLoader label="Loading schedule..." />;
   }
 
   return (
@@ -151,9 +170,7 @@ export default function SchedulePage() {
         </div>
       )}
 
-      {loading ? (
-        <div className="text-sm text-gray-400">Loading schedule...</div>
-      ) : subjects.length === 0 ? (
+      {subjects.length === 0 ? (
         <div className="glass-card p-4 text-sm text-gray-400">
           Add subjects first before creating your schedule.
         </div>

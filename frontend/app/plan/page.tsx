@@ -360,7 +360,7 @@ export default function PlanPage() {
       ) : (
         <>
           {loadingRecovery ? (
-            <div className="text-sm text-gray-400">Loading recovery details...</div>
+            <FullScreenLoader label="Loading planner..." />
           ) : subjects.length === 0 ? (
             <div className="glass-card p-4 text-sm text-gray-400">
               Add your subjects first to see recovery suggestions.
