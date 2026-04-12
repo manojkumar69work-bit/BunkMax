@@ -5,6 +5,7 @@ import BottomNav from "@/components/BottomNav";
 import { deleteSubject, getSubjects, saveSubject } from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 import FullScreenLoader from "@/components/FullScreenLoader";
+import { Trash2 } from "lucide-react";
 
 type Subject = {
   id: number;
@@ -24,7 +25,6 @@ export default function SubjectsPage() {
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
   const [busyId, setBusyId] = useState<number | null>(null);
 
   const [form, setForm] = useState({
@@ -43,7 +43,6 @@ export default function SubjectsPage() {
     try {
       setLoading(true);
       setError("");
-      setMessage("");
       const data = await getSubjects(userId);
       setSubjects(data);
     } catch (e) {
@@ -71,7 +70,6 @@ export default function SubjectsPage() {
     }
 
     setError("");
-    setMessage("");
 
     try {
       await saveSubject(
@@ -91,7 +89,6 @@ export default function SubjectsPage() {
         required_percentage: 75,
       });
 
-      setMessage("Subject saved successfully.");
       await loadSubjects(appUser.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save subject");
@@ -102,12 +99,10 @@ export default function SubjectsPage() {
     if (!appUser?.id) return;
 
     setError("");
-    setMessage("");
 
     try {
       await deleteSubject(subjectId, appUser.id);
       setSubjects((prev) => prev.filter((s) => s.id !== subjectId));
-      setMessage("Subject deleted.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete subject");
     }
@@ -123,7 +118,6 @@ export default function SubjectsPage() {
     if (!appUser?.id) return;
 
     setError("");
-    setMessage("");
     setBusyId(subject.id);
 
     try {
@@ -161,8 +155,6 @@ export default function SubjectsPage() {
             : s
         )
       );
-
-      setMessage("Subject updated.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update subject");
     } finally {
@@ -207,12 +199,6 @@ export default function SubjectsPage() {
       {error && (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
           {error}
-        </div>
-      )}
-
-      {message && (
-        <div className="rounded-xl border border-green-500/30 bg-green-500/10 p-3 text-sm text-green-200">
-          {message}
         </div>
       )}
 
@@ -296,9 +282,11 @@ export default function SubjectsPage() {
                   <button
                     type="button"
                     onClick={() => handleDelete(subject.id)}
-                    className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-200"
+                    className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-500/30 bg-red-500/10 text-red-200 hover:bg-red-500/15 transition"
+                    aria-label={`Delete ${subject.subject_name}`}
+                    title="Delete subject"
                   >
-                    Delete
+                    <Trash2 size={18} />
                   </button>
                 </div>
 

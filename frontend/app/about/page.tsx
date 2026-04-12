@@ -37,19 +37,19 @@ export default function AboutPage() {
 
         <div className="space-y-2 text-sm">
           <a
-            href="mailto:yourgmail@gmail.com"
+            href="mailto:bunkmax.org@gmail.com"
             className="block rounded-lg border border-white/10 bg-white/5 px-4 py-3 hover:bg-white/10 transition"
           >
-            📧 Gmail: yourgmail@gmail.com
+            📧 Gmail: bunkmax.org@gmail.com
           </a>
 
           <a
-            href="https://instagram.com/yourusername"
+            href="https://instagram.com/bunkmax_org"
             target="_blank"
             rel="noopener noreferrer"
             className="block rounded-lg border border-white/10 bg-white/5 px-4 py-3 hover:bg-white/10 transition"
           >
-            📸 Instagram: @yourusername
+            📸 Instagram:@bunkmax_org
           </a>
         </div>
       </div>

@@ -316,7 +316,7 @@ export default function ImportPage() {
           className="input-ui min-h-44"
           value={pastedText}
           onChange={(e) => setPastedText(e.target.value)}
-          placeholder="Copy attendance from ERP and paste here..."
+          placeholder="ERP Login/Academic Planning/Paste Here"
         />
 
         <button onClick={handleParse} className="primary-btn">
