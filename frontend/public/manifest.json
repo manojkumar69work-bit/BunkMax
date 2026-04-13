@@ -1,6 +1,12 @@
 {
-  "name": "BunkMax",
+  "name": "BunkMax - Smart Attendance Planner",
   "short_name": "BunkMax",
+  "description": "Track attendance, plan bunks, and stay above 75% with smart insights.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "orientation": "portrait",
   "icons": [
     {
       "src": "/android-chrome-192x192.png",
@@ -12,8 +18,5 @@
       "sizes": "512x512",
       "type": "image/png"
     }
-  ],
-  "theme_color": "#0f172a",
-  "background_color": "#0f172a",
-  "display": "standalone"
+  ]
 }
