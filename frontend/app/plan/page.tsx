@@ -64,14 +64,17 @@ function calcOverall(subjects: Subject[]) {
 }
 
 function calcAverage(subjects: Subject[]) {
-  if (subjects.length === 0) return 0;
-  return (
-    subjects.reduce((sum, s) => {
-      const total = s.total_classes || 0;
-      const attended = s.attended_classes || 0;
-      return sum + (total > 0 ? (attended / total) * 100 : 0);
-    }, 0) / subjects.length
+  const validSubjects = subjects.filter(
+    (s) => (s.total_classes || 0) > 0
   );
+
+  if (validSubjects.length === 0) return 0;
+
+  const sum = validSubjects.reduce((acc, s) => {
+    return acc + (s.attended_classes / s.total_classes) * 100;
+  }, 0);
+
+  return sum / validSubjects.length;
 }
 
 export default function PlanPage() {

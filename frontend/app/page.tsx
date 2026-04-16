@@ -216,18 +216,19 @@ export default function Home() {
           };
         });
 
+        const validSubjects = updatedSubjects.filter(
+          (s) => s.total_classes > 0
+        );
+
         const currentAvg =
-          updatedSubjects.length > 0
+          validSubjects.length > 0
             ? Number(
                 (
-                  updatedSubjects.reduce(
+                  validSubjects.reduce(
                     (sum, s) =>
-                      sum +
-                      (s.total_classes > 0
-                        ? (s.attended_classes / s.total_classes) * 100
-                        : 0),
+                      sum + (s.attended_classes / s.total_classes) * 100,
                     0
-                  ) / updatedSubjects.length
+                  ) / validSubjects.length
                 ).toFixed(2)
               )
             : 0;
