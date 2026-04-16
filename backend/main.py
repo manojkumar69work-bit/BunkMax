@@ -80,17 +80,22 @@ def calc_overall(subjects: list[dict[str, Any]]) -> float:
 
 
 def calc_avg(subjects: list[dict[str, Any]]) -> float:
-    if not subjects:
+    valid_subjects = [
+        s for s in subjects
+        if int(s.get("total_classes") or 0) > 0
+    ]
+
+    if not valid_subjects:
         return 0.0
 
     total_pct = 0.0
-    for s in subjects:
+
+    for s in valid_subjects:
         attended = int(s.get("attended_classes") or 0)
         total = int(s.get("total_classes") or 0)
-        pct = (attended / total * 100) if total > 0 else 0.0
-        total_pct += pct
+        total_pct += (attended / total) * 100
 
-    return total_pct / len(subjects)
+    return total_pct / len(valid_subjects)
 
 
 def build_subject_response(row: dict[str, Any]) -> dict[str, Any]:
