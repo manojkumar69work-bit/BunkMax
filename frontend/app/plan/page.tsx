@@ -64,9 +64,7 @@ function calcOverall(subjects: Subject[]) {
 }
 
 function calcAverage(subjects: Subject[]) {
-  const validSubjects = subjects.filter(
-    (s) => (s.total_classes || 0) > 0
-  );
+  const validSubjects = subjects.filter((s) => (s.total_classes || 0) > 0);
 
   if (validSubjects.length === 0) return 0;
 
@@ -88,41 +86,56 @@ export default function PlanPage() {
   const [selectedDays, setSelectedDays] = useState<string[]>(["Monday"]);
 
   const [bunkResult, setBunkResult] = useState<BunkResult | null>(null);
+  const [recoveryResult, setRecoveryResult] = useState<RecoveryResult | null>(null);
 
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [timetable, setTimetable] = useState<Timetable>({});
-  const [loadingRecovery, setLoadingRecovery] = useState(true);
-  const [error, setError] = useState("");
 
+  const [loadingPage, setLoadingPage] = useState(true);
+  const [runningBunk, setRunningBunk] = useState(false);
+  const [runningRecovery, setRunningRecovery] = useState(false);
+
+  const [error, setError] = useState("");
   const [recoveryDays, setRecoveryDays] = useState("");
-  const [recoveryResult, setRecoveryResult] = useState<RecoveryResult | null>(null);
 
   useEffect(() => {
-    if (!appUser) return;
-    loadRecoveryData(appUser.id);
+    if (!appUser?.id) return;
+    loadPageData(appUser.id);
   }, [appUser]);
 
-  async function loadRecoveryData(userId: number) {
+  async function loadPageData(userId: number) {
     try {
-      setLoadingRecovery(true);
+      setLoadingPage(true);
       setError("");
+
       const [subjectData, timetableData] = await Promise.all([
         getSubjects(userId),
         getTimetable(userId),
       ]);
+
       setSubjects(subjectData);
       setTimetable(normalizeTimetable(timetableData));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load data");
+      setError(e instanceof Error ? e.message : "Failed to load planner data");
     } finally {
-      setLoadingRecovery(false);
+      setLoadingPage(false);
     }
   }
 
+  function toggleDay(day: string) {
+    setSelectedDays((prev) =>
+      prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]
+    );
+  }
+
+  const currentOverall = useMemo(() => calcOverall(subjects), [subjects]);
+  const currentAverage = useMemo(() => calcAverage(subjects), [subjects]);
+
   async function handleRun() {
-    if (!appUser) return;
+    if (!appUser?.id) return;
 
     try {
+      setRunningBunk(true);
       setError("");
       setBunkResult(null);
 
@@ -136,9 +149,19 @@ export default function PlanPage() {
           setError("Enter number of days.");
           return;
         }
-        res = await planBunks({ mode: "next_n_days", n_days: parsed }, appUser.id);
+
+        res = await planBunks(
+          { mode: "next_n_days", n_days: parsed },
+          appUser.id
+        );
       } else {
         const parsedWeeks = Number(weeks || 1);
+
+        if (selectedDays.length === 0) {
+          setError("Select at least one day.");
+          return;
+        }
+
         res = await planBunks(
           {
             mode: "selected_weekdays",
@@ -150,7 +173,10 @@ export default function PlanPage() {
       }
 
       setBunkResult({
-        scenario_label: res.scenario_label,
+        scenario_label:
+          mode === "tomorrow" && typeof res.scenario_label === "string"
+            ? res.scenario_label.replace("Absent tomorrow", "Absent on next class day")
+            : res.scenario_label,
         new_overall: Number(res.new_overall || 0),
         drop_overall: Number(res.drop_overall || 0),
         new_avg: Number(res.new_avg || 0),
@@ -158,73 +184,73 @@ export default function PlanPage() {
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to run prediction");
+    } finally {
+      setRunningBunk(false);
     }
   }
 
-  function toggleDay(day: string) {
-    setSelectedDays((prev) =>
-      prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]
-    );
-  }
+  async function runRecovery() {
+    try {
+      setRunningRecovery(true);
+      setError("");
+      setRecoveryResult(null);
 
-  const currentOverall = useMemo(() => calcOverall(subjects), [subjects]);
-  const currentAverage = useMemo(() => calcAverage(subjects), [subjects]);
+      const parsedDays = Number(recoveryDays);
+      if (!parsedDays || parsedDays <= 0) {
+        setError("Enter number of recovery days.");
+        return;
+      }
 
-  function runRecovery() {
-    setError("");
-    setRecoveryResult(null);
+      if (subjects.length === 0) {
+        setError("Add subjects first.");
+        return;
+      }
 
-    const parsedDays = Number(recoveryDays);
-    if (!parsedDays || parsedDays <= 0) {
-      setError("Enter number of recovery days.");
-      return;
-    }
+      const dayOrder = DAYS.filter((day) =>
+        (timetable[day] || []).some((s) => String(s || "").trim() !== "")
+      );
 
-    if (subjects.length === 0) {
-      setError("Add subjects first.");
-      return;
-    }
+      if (dayOrder.length === 0) {
+        setError("Create your schedule first.");
+        return;
+      }
 
-    const dayOrder = DAYS.filter((day) =>
-      (timetable[day] || []).some((s) => String(s || "").trim() !== "")
-    );
+      const simulated: Subject[] = subjects.map((s) => ({ ...s }));
 
-    if (dayOrder.length === 0) {
-      setError("Create your schedule first.");
-      return;
-    }
+      for (let i = 0; i < parsedDays; i++) {
+        const day = dayOrder[i % dayOrder.length];
+        const periods = timetable[day] || [];
 
-    const simulated: Subject[] = subjects.map((s) => ({ ...s }));
+        for (const subjectName of periods) {
+          const clean = String(subjectName || "").trim();
+          if (!clean) continue;
 
-    for (let i = 0; i < parsedDays; i++) {
-      const day = dayOrder[i % dayOrder.length];
-      const periods = timetable[day] || [];
+          const subject = simulated.find(
+            (s) => s.subject_name.trim().toLowerCase() === clean.toLowerCase()
+          );
 
-      for (const subjectName of periods) {
-        const clean = String(subjectName || "").trim();
-        if (!clean) continue;
-
-        const subject = simulated.find(
-          (s) => s.subject_name.trim().toLowerCase() === clean.toLowerCase()
-        );
-
-        if (subject) {
-          subject.attended_classes += 1;
-          subject.total_classes += 1;
+          if (subject) {
+            subject.attended_classes += 1;
+            subject.total_classes += 1;
+          }
         }
       }
+
+      const newOverall = calcOverall(simulated);
+      const newAvg = calcAverage(simulated);
+
+      setRecoveryResult({
+        label: `Recovery for ${parsedDays} consecutive days`,
+        new_overall: Number(newOverall.toFixed(2)),
+        increase_overall: Number((newOverall - currentOverall).toFixed(2)),
+        new_avg: Number(newAvg.toFixed(2)),
+        increase_avg: Number((newAvg - currentAverage).toFixed(2)),
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to calculate recovery");
+    } finally {
+      setRunningRecovery(false);
     }
-
-    const newOverall = calcOverall(simulated);
-    const newAvg = calcAverage(simulated);
-
-    setRecoveryResult({
-      label: `Recovery for ${parsedDays} consecutive days`,
-      new_overall: Number(newOverall.toFixed(2)),
-      increase_overall: Number((newOverall - currentOverall).toFixed(2)),
-      new_avg: Number(newAvg.toFixed(2)),
-      increase_avg: Number((newAvg - currentAverage).toFixed(2)),
-    });
   }
 
   if (loadingUser) {
@@ -232,7 +258,24 @@ export default function PlanPage() {
   }
 
   if (!appUser) {
-    return <div className="app-shell text-sm text-red-300">User not found.</div>;
+    return (
+      <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
+        <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
+          <h1 className="text-2xl font-bold">BunkMax</h1>
+          <p className="text-sm text-gray-300">Please login to continue.</p>
+          <a
+            href="/login"
+            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
+          >
+            Go to Login
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadingPage) {
+    return <FullScreenLoader label="Loading planner..." />;
   }
 
   return (
@@ -253,7 +296,10 @@ export default function PlanPage() {
       <div className="grid grid-cols-2 gap-3">
         <button
           type="button"
-          onClick={() => setView("bunk")}
+          onClick={() => {
+            setView("bunk");
+            setError("");
+          }}
           className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition ${
             view === "bunk"
               ? "border-white/20 bg-white/15 text-white"
@@ -265,7 +311,10 @@ export default function PlanPage() {
 
         <button
           type="button"
-          onClick={() => setView("recovery")}
+          onClick={() => {
+            setView("recovery");
+            setError("");
+          }}
           className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition ${
             view === "recovery"
               ? "border-white/20 bg-white/15 text-white"
@@ -281,10 +330,14 @@ export default function PlanPage() {
           <div className="soft-card p-4 space-y-3">
             <select
               value={mode}
-              onChange={(e) => setMode(e.target.value)}
+              onChange={(e) => {
+                setMode(e.target.value);
+                setBunkResult(null);
+                setError("");
+              }}
               className="input-ui"
             >
-              <option value="tomorrow">Absent tomorrow</option>
+              <option value="tomorrow">Absent on next class day</option>
               <option value="next_n_days">Absent for next N class days</option>
               <option value="selected_weekdays">Absent on selected weekdays</option>
             </select>
@@ -328,8 +381,12 @@ export default function PlanPage() {
               </>
             )}
 
-            <button onClick={handleRun} className="primary-btn">
-              Run Prediction
+            <button
+              onClick={handleRun}
+              disabled={runningBunk}
+              className="primary-btn disabled:opacity-60"
+            >
+              {runningBunk ? "Running Prediction..." : "Run Prediction"}
             </button>
           </div>
 
@@ -362,9 +419,7 @@ export default function PlanPage() {
         </>
       ) : (
         <>
-          {loadingRecovery ? (
-            <FullScreenLoader label="Loading planner..." />
-          ) : subjects.length === 0 ? (
+          {subjects.length === 0 ? (
             <div className="glass-card p-4 text-sm text-gray-400">
               Add your subjects first to see recovery suggestions.
             </div>
@@ -379,8 +434,12 @@ export default function PlanPage() {
                   placeholder="Enter number of days"
                 />
 
-                <button onClick={runRecovery} className="primary-btn">
-                  Calculate Recovery
+                <button
+                  onClick={runRecovery}
+                  disabled={runningRecovery}
+                  className="primary-btn disabled:opacity-60"
+                >
+                  {runningRecovery ? "Calculating..." : "Calculate Recovery"}
                 </button>
               </div>
 

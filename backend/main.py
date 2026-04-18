@@ -762,26 +762,44 @@ def save_schedule(user_id: int, payload: list[ScheduleEntry]):
 @app.get("/users/{user_id}/tomorrow")
 def get_tomorrow(user_id: int):
     subjects = load_subjects_minimal(user_id)
-    tomorrow_name = get_tomorrow_name()
-
     timetable_rows = load_timetable_rows(user_id)
     day_map = build_day_map(timetable_rows)
 
     current_overall = calc_overall(subjects)
     current_avg = calc_avg(subjects)
 
-    missed_subjects = day_map.get(tomorrow_name, [])
+    # 🔥 Find NEXT VALID CLASS DAY (skip Sunday / empty days)
+    today_idx = datetime.now(ZoneInfo("Asia/Kolkata")).weekday()  # 0=Mon
+
+    next_day_name = None
+
+    for i in range(1, 8):
+        day_name = WEEKDAYS[(today_idx + i) % len(WEEKDAYS)]
+
+        if day_name in day_map and len(day_map[day_name]) > 0:
+            next_day_name = day_name
+            break
+
+    # fallback (no timetable)
+    if not next_day_name:
+        return {
+            "title": "No upcoming classes",
+            "new_overall": round(current_overall, 2),
+            "drop_overall": 0.0,
+            "new_avg": round(current_avg, 2),
+            "drop_avg": 0.0,
+        }
+
+    # simulate absence
+    missed_subjects = day_map.get(next_day_name, [])
     simulated = simulate_absence_for_subjects(subjects, missed_subjects)
 
-    new_overall = simulated["new_overall"]
-    new_avg = simulated["new_avg"]
-
     return {
-        "title": f"Tomorrow ({tomorrow_name})",
-        "new_overall": round(new_overall, 2),
-        "drop_overall": round(current_overall - new_overall, 2),
-        "new_avg": round(new_avg, 2),
-        "drop_avg": round(current_avg - new_avg, 2),
+        "title": f"Next Class Day ({next_day_name})",
+        "new_overall": round(simulated["new_overall"], 2),
+        "drop_overall": round(current_overall - simulated["new_overall"], 2),
+        "new_avg": round(simulated["new_avg"], 2),
+        "drop_avg": round(current_avg - simulated["new_avg"], 2),
     }
 
 
