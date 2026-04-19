@@ -23,6 +23,7 @@ export default function RootLayout({
         <Providers>
           <div className="max-w-md mx-auto min-h-screen pb-20">{children}</div>
         </Providers>
+        <Analytics />
       </body>
     </html>
   );
