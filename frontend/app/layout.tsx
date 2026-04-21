@@ -1,6 +1,6 @@
 import "./globals.css";
 import Providers from "./providers";
-import { Analytics } from "@vercel/analytics/next"
+import { Analytics } from "@vercel/analytics/next";
 
 export const metadata = {
   title: "BunkMax",
@@ -23,6 +23,7 @@ export default function RootLayout({
         <Providers>
           <div className="max-w-md mx-auto min-h-screen pb-20">{children}</div>
         </Providers>
+        <Analytics />
       </body>
     </html>
   );
