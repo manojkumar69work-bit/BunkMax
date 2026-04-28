@@ -51,43 +51,58 @@ function titleCaseLikeOriginal(s: string) {
 
 function parsePercentageSection(text: string): PercentageRow[] {
   const start = text.indexOf("Course Wise Attendance");
-  const end = text.indexOf("Average Attendance");
+  if (start === -1) return [];
 
-  if (start === -1 || end === -1 || end <= start) return [];
+  const end = text.indexOf("Course Wise Sessions List");
+  const section = text.slice(
+    start + "Course Wise Attendance".length,
+    end !== -1 ? end : undefined
+  );
 
-  const section = text.slice(start + "Course Wise Attendance".length, end);
   const lines = section
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
 
   const rows: PercentageRow[] = [];
-  let i = 0;
 
-  while (i < lines.length) {
+  let bufferSubjects: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    if (/^\d+(\.\d+)?%$/.test(line)) {
-      i++;
+    const percentMatch = line.match(/^(\d+(\.\d+)?)\s*%$/);
+
+    if (percentMatch) {
+      const percentage = Number(percentMatch[1]);
+
+      if (bufferSubjects.length > 0) {
+        // assign same percentage to all buffered subjects
+        bufferSubjects.forEach((subject) => {
+          rows.push({
+            subject_name: titleCaseLikeOriginal(subject),
+            percentage,
+          });
+        });
+        bufferSubjects = [];
+      }
+
       continue;
     }
 
-    const next = lines[i + 1];
-    if (next && /^\d+(\.\d+)?%$/.test(next)) {
-      rows.push({
-        subject_name: titleCaseLikeOriginal(line),
-        percentage: Number(next.replace("%", "")),
-      });
-      i += 2;
+    // skip noise lines
+    if (
+      line.toLowerCase().includes("present sessions") ||
+      line.toLowerCase().includes("total sessions")
+    ) {
       continue;
     }
 
-    i++;
+    bufferSubjects.push(line);
   }
 
   return rows;
 }
-
 function parseSessionSection(text: string): SessionRow[] {
   const start = text.indexOf("Course Wise Sessions List");
   if (start === -1) return [];
