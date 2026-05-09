@@ -1,20 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import BottomNav from "@/components/BottomNav";
-import { getSubjects, getTimetable, calendarPlan } from "@/lib/api";
+import { calendarPlan } from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 import FullScreenLoader from "@/components/FullScreenLoader";
 
-type Subject = {
-  id?: number;
-  subject_name: string;
-  attended_classes: number;
-  total_classes: number;
-  required_percentage?: number;
-};
-
-type Timetable = Record<string, string[]>;
+type CalendarStatus = "present" | "absent";
 
 type CalendarResult = {
   scenario_label: string;
@@ -31,42 +23,14 @@ type CalendarResult = {
   }>;
 };
 
-function normalizeTimetable(data: any): Timetable {
-  if (!data) return {};
-  if (!Array.isArray(data)) return data;
-
-  const map: Timetable = {};
-
-  for (const row of data) {
-    const day = row.day_name;
-    const index = Number(row.period_no) - 1;
-    const subject = row.subject_name || "";
-
-    if (!map[day]) {
-      map[day] = Array(6).fill("");
-    }
-
-    if (index >= 0 && index < 6) {
-      map[day][index] = subject;
-    }
-  }
-
-  return map;
-}
-
-/* ✅ FIXED: Calendar now aligns with Mon Tue Wed Thu Fri Sat Sun */
 function generateCalendarDays(date: Date): (number | null)[] {
   const year = date.getFullYear();
   const month = date.getMonth();
 
-  const jsFirstDay = new Date(year, month, 1).getDay(); 
-  // JS: 0 = Sunday, 1 = Monday, ..., 6 = Saturday
-
+  const jsFirstDay = new Date(year, month, 1).getDay();
   const mondayFirstIndex = jsFirstDay === 0 ? 6 : jsFirstDay - 1;
-  // Calendar UI: 0 = Monday, ..., 6 = Sunday
 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
-
   const days: (number | null)[] = [];
 
   for (let i = 0; i < mondayFirstIndex; i++) {
@@ -100,14 +64,10 @@ function formatDateDisplay(dateStr: string): string {
 export default function PlanPage() {
   const { appUser, loadingUser } = useAppUser();
 
-  const [subjects, setSubjects] = useState<Subject[]>([]);
-  const [timetable, setTimetable] = useState<Timetable>({});
-  const [loadingPage, setLoadingPage] = useState(true);
-
   const [currentMonth, setCurrentMonth] = useState(new Date());
 
   const [selectedDates, setSelectedDates] = useState<
-    Map<string, "present" | "absent">
+    Map<string, CalendarStatus>
   >(new Map());
 
   const [showDateModal, setShowDateModal] = useState(false);
@@ -120,44 +80,20 @@ export default function PlanPage() {
   const [runningPrediction, setRunningPrediction] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    if (!appUser?.id) return;
-    loadPageData(appUser.id);
-  }, [appUser]);
-
-  async function loadPageData(userId: number) {
-    try {
-      setLoadingPage(true);
-      setError("");
-
-      const [subjectData, timetableData] = await Promise.all([
-        getSubjects(userId),
-        getTimetable(userId),
-      ]);
-
-      setSubjects(subjectData);
-      setTimetable(normalizeTimetable(timetableData));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load planner data");
-    } finally {
-      setLoadingPage(false);
-    }
-  }
-
   function previousMonth() {
     setCurrentMonth(
       new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1)
     );
-    setCalendarResult(null);
     setError("");
+    setCalendarResult(null);
   }
 
   function nextMonth() {
     setCurrentMonth(
       new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1)
     );
-    setCalendarResult(null);
     setError("");
+    setCalendarResult(null);
   }
 
   function handleDateClick(day: number) {
@@ -168,12 +104,11 @@ export default function PlanPage() {
     );
 
     const dateObj = new Date(`${dateStr}T00:00:00`);
-
     setSelectedDateForModal(dateObj);
     setShowDateModal(true);
   }
 
-  function markDateStatus(status: "present" | "absent") {
+  function markDateStatus(status: CalendarStatus) {
     if (!selectedDateForModal) return;
 
     const dateStr = formatDateString(
@@ -182,14 +117,14 @@ export default function PlanPage() {
       selectedDateForModal.getFullYear()
     );
 
-    const newMap = new Map(selectedDates);
-    newMap.set(dateStr, status);
+    const updated = new Map(selectedDates);
+    updated.set(dateStr, status);
 
-    setSelectedDates(newMap);
-    setShowDateModal(false);
-    setSelectedDateForModal(null);
+    setSelectedDates(updated);
     setCalendarResult(null);
     setError("");
+    setShowDateModal(false);
+    setSelectedDateForModal(null);
   }
 
   function clearDateSelection() {
@@ -201,21 +136,21 @@ export default function PlanPage() {
       selectedDateForModal.getFullYear()
     );
 
-    const newMap = new Map(selectedDates);
-    newMap.delete(dateStr);
+    const updated = new Map(selectedDates);
+    updated.delete(dateStr);
 
-    setSelectedDates(newMap);
-    setShowDateModal(false);
-    setSelectedDateForModal(null);
+    setSelectedDates(updated);
     setCalendarResult(null);
     setError("");
+    setShowDateModal(false);
+    setSelectedDateForModal(null);
   }
 
   function removeSelectedDate(dateStr: string) {
-    const newMap = new Map(selectedDates);
-    newMap.delete(dateStr);
+    const updated = new Map(selectedDates);
+    updated.delete(dateStr);
 
-    setSelectedDates(newMap);
+    setSelectedDates(updated);
     setCalendarResult(null);
     setError("");
   }
@@ -241,7 +176,6 @@ export default function PlanPage() {
       );
 
       const result = await calendarPlan({ days }, appUser.id);
-
       setCalendarResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to run prediction");
@@ -272,10 +206,6 @@ export default function PlanPage() {
     );
   }
 
-  if (loadingPage) {
-    return <FullScreenLoader label="Loading planner..." />;
-  }
-
   const calendarDays = generateCalendarDays(currentMonth);
 
   const monthName = currentMonth.toLocaleDateString("en-US", {
@@ -298,7 +228,6 @@ export default function PlanPage() {
         </div>
       )}
 
-      {/* Month Navigation */}
       <div className="flex items-center justify-between px-2">
         <button
           type="button"
@@ -319,7 +248,6 @@ export default function PlanPage() {
         </button>
       </div>
 
-      {/* Calendar Grid */}
       <div className="soft-card p-4">
         <div className="grid grid-cols-7 gap-1">
           {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => (
@@ -402,7 +330,6 @@ export default function PlanPage() {
       {showDateModal && selectedDateForModal && (
         <DateSelectionModal
           date={selectedDateForModal}
-          isOpen={showDateModal}
           onClose={() => {
             setShowDateModal(false);
             setSelectedDateForModal(null);
@@ -429,7 +356,7 @@ function SelectedDatesSummary({
   dates,
   onRemove,
 }: {
-  dates: Map<string, "present" | "absent">;
+  dates: Map<string, CalendarStatus>;
   onRemove: (dateStr: string) => void;
 }) {
   const dateArray = Array.from(dates.entries()).sort(([a], [b]) =>
@@ -576,7 +503,6 @@ function SkippedDatesDisplay({
 
 function DateSelectionModal({
   date,
-  isOpen,
   onClose,
   onPresent,
   onAbsent,
@@ -584,15 +510,12 @@ function DateSelectionModal({
   currentStatus,
 }: {
   date: Date;
-  isOpen: boolean;
   onClose: () => void;
   onPresent: () => void;
   onAbsent: () => void;
   onClear: () => void;
-  currentStatus?: "present" | "absent";
+  currentStatus?: CalendarStatus;
 }) {
-  if (!isOpen) return null;
-
   return (
     <>
       <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />

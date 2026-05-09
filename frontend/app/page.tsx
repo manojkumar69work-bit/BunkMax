@@ -5,10 +5,10 @@ import BottomNav from "@/components/BottomNav";
 import Link from "next/link";
 import {
   getHomeData,
+  getSchedule,
   getTomorrow,
   getBestDay,
   getWorstDay,
-  getSchedule,
 } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
 import { Info } from "lucide-react";
@@ -60,12 +60,15 @@ export default function Home() {
   const [tomorrow, setTomorrow] = useState<QuickResult | null>(null);
   const [best, setBest] = useState<QuickResult | null>(null);
   const [worst, setWorst] = useState<QuickResult | null>(null);
+
   const [timetable, setTimetable] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
 
   const daysStatus = useMemo(() => {
-    if (!data || Object.keys(timetable).length === 0) {
-      return "Loading...";
+    if (!data) return "Loading...";
+
+    if (Object.keys(timetable).length === 0) {
+      return "No schedule";
     }
 
     return getDaysStatus(
@@ -86,23 +89,32 @@ export default function Home() {
         const grouped: Record<string, string[]> = {};
 
         scheduleData.forEach((item: any) => {
-          if (!grouped[item.day_name]) grouped[item.day_name] = [];
-          grouped[item.day_name].push(item.subject_name);
+          if (!item?.day_name) return;
+
+          if (!grouped[item.day_name]) {
+            grouped[item.day_name] = [];
+          }
+
+          if (item.subject_name && String(item.subject_name).trim()) {
+            grouped[item.day_name].push(item.subject_name);
+          }
         });
 
         setTimetable(grouped);
       } catch (err) {
-        console.error("Schedule load failed", err);
+        console.error("Schedule load failed:", err);
       }
     }
 
     loadSchedule();
-  }, [appUser]);
+  }, [appUser?.id]);
 
   useEffect(() => {
     if (!appUser?.id) return;
-    loadDashboard(appUser.id);
-  }, [appUser]);
+
+    const userId = appUser.id;
+    loadDashboard(userId);
+  }, [appUser?.id]);
 
   async function loadDashboard(userId: number) {
     try {
@@ -110,57 +122,82 @@ export default function Home() {
       setError("");
 
       const homeData = await getHomeData(userId);
+
       setData(homeData.dashboard);
-      setSubjects(homeData.subjects);
+      setSubjects(homeData.subjects || []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load home data");
+      const errorMsg =
+        e instanceof Error ? e.message : "Failed to load home data";
+      setError(errorMsg);
+      console.error("Dashboard load error:", errorMsg);
     } finally {
       setLoading(false);
     }
   }
 
   async function runTomorrow() {
-    if (!appUser?.id) return;
+    if (!appUser?.id || busy) return;
+
+    const userId = appUser.id;
 
     try {
       setBusy("tomorrow");
-      const result = await getTomorrow(appUser.id);
+      setError("");
 
+      const result = await getTomorrow(userId);
       const nextClassDay = getNextClassDay(timetable);
-      if (nextClassDay) {
-        setTomorrow({
-          ...result,
-          title: `Next Class Day (${nextClassDay})`,
-        });
-      } else {
-        setTomorrow(result);
-      }
+
+      setTomorrow(
+        nextClassDay
+          ? {
+              ...result,
+              title: `Next Class Day (${nextClassDay})`,
+            }
+          : result
+      );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      const errorMsg =
+        e instanceof Error ? e.message : "Failed to load prediction";
+      setError(errorMsg);
+      console.error("Tomorrow prediction error:", errorMsg);
     } finally {
       setBusy("");
     }
   }
 
   async function runBest() {
-    if (!appUser?.id) return;
+    if (!appUser?.id || busy) return;
+
+    const userId = appUser.id;
+
     try {
       setBusy("best");
-      setBest(await getBestDay(appUser.id));
+      setError("");
+      setBest(await getBestDay(userId));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      const errorMsg =
+        e instanceof Error ? e.message : "Failed to find best day";
+      setError(errorMsg);
+      console.error("Best day error:", errorMsg);
     } finally {
       setBusy("");
     }
   }
 
   async function runWorst() {
-    if (!appUser?.id) return;
+    if (!appUser?.id || busy) return;
+
+    const userId = appUser.id;
+
     try {
       setBusy("worst");
-      setWorst(await getWorstDay(appUser.id));
+      setError("");
+      setWorst(await getWorstDay(userId));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      const errorMsg =
+        e instanceof Error ? e.message : "Failed to find worst day";
+      setError(errorMsg);
+      console.error("Worst day error:", errorMsg);
     } finally {
       setBusy("");
     }
@@ -180,20 +217,12 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
         <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">BunkMax</h1>
-            <p className="text-sm text-gray-400 mt-2">
-              Your attendance companion
-            </p>
-          </div>
-
-          <p className="text-sm text-gray-300 leading-relaxed">
-            Please sign in with your MLRIT student account to continue.
-          </p>
+          <h1 className="text-2xl font-bold">BunkMax</h1>
+          <p className="text-sm text-gray-300">Please login to continue.</p>
 
           <a
             href="/login"
-            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/10 bg-gradient-to-b from-white to-gray-200 text-black px-4 py-3 font-semibold hover:from-gray-100 hover:to-gray-300 active:scale-[0.98] transition shadow-lg"
+            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
           >
             Go to Login
           </a>
@@ -202,13 +231,17 @@ export default function Home() {
     );
   }
 
+  if (loading) {
+    return <FullScreenLoader label="Loading dashboard..." />;
+  }
+
   return (
     <div className="app-shell">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">BunkMax</h1>
           <p className="text-sm text-gray-400 mt-1">
-            Stay above 75%, Stress-free.
+            Stay above 75%, stress-free.
           </p>
         </div>
 
@@ -226,9 +259,7 @@ export default function Home() {
         </div>
       )}
 
-      {loading || !data ? (
-        <FullScreenLoader label="Loading dashboard..." />
-      ) : (
+      {data && (
         <>
           <StatsOverview
             overall={data.overall_percentage}
@@ -246,6 +277,7 @@ export default function Home() {
                   Import subjects and attendance into BunkMax
                 </p>
               </div>
+
               <Link
                 href="/import"
                 className="inline-flex min-w-[96px] items-center justify-center rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md"
@@ -259,26 +291,29 @@ export default function Home() {
 
           <QuickCard
             title="Should I skip tomorrow?"
-            desc="Instant answer for the next class day."
+            desc="Impact of missing the next class day."
             buttonText={busy === "tomorrow" ? "Checking..." : "Check Tomorrow"}
             onClick={runTomorrow}
             result={tomorrow}
+            disabled={busy !== ""}
           />
 
           <QuickCard
             title="Best day to skip"
-            desc="Find the safest upcoming day."
+            desc="Find the day with least attendance impact."
             buttonText={busy === "best" ? "Finding..." : "Find Best Day"}
             onClick={runBest}
             result={best}
+            disabled={busy !== ""}
           />
 
           <QuickCard
             title="Avoid skipping on"
-            desc="Know the worst upcoming day to miss."
+            desc="Know the day with highest attendance impact."
             buttonText={busy === "worst" ? "Finding..." : "Find Worst Day"}
             onClick={runWorst}
             result={worst}
+            disabled={busy !== ""}
           />
 
           <div className="section-title">Today&apos;s Classes</div>
@@ -342,7 +377,9 @@ function StatsOverview({
     <div className="grid grid-cols-2 gap-3 items-stretch">
       <div className="glass-card p-4 row-span-2 min-h-[220px] flex flex-col items-center justify-center">
         <DonutChart percentage={overall} />
-        <p className="mt-4 text-base font-semibold text-white">{daysStatus}</p>
+        <p className="mt-4 text-base font-semibold text-white">
+          {daysStatus}
+        </p>
       </div>
 
       <div className="glass-card p-4 min-h-[104px] flex flex-col justify-center">
@@ -367,7 +404,7 @@ function StatsOverview({
 }
 
 function DonutChart({ percentage }: { percentage: number }) {
-  const value = Math.max(0, Math.min(100, percentage));
+  const value = Math.max(0, Math.min(100, percentage || 0));
 
   return (
     <div className="relative h-36 w-36 flex items-center justify-center">
@@ -395,12 +432,14 @@ function QuickCard({
   buttonText,
   onClick,
   result,
+  disabled,
 }: {
   title: string;
   desc: string;
   buttonText: string;
   onClick: () => void;
   result: QuickResult | null;
+  disabled?: boolean;
 }) {
   return (
     <div className="soft-card p-4 space-y-3">
@@ -409,7 +448,12 @@ function QuickCard({
         <p className="text-xs text-gray-400 mt-1">{desc}</p>
       </div>
 
-      <button type="button" onClick={onClick} className="secondary-btn">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="secondary-btn disabled:opacity-60"
+      >
         {buttonText}
       </button>
 
@@ -457,25 +501,8 @@ function formatPercent(value: number | undefined) {
   if (value === undefined || value === null || isNaN(value)) {
     return "0.00%";
   }
+
   return `${Number(value.toFixed(2))}%`;
-}
-
-function getNextClassDay(timetable: Record<string, string[]>) {
-  const jsDay = new Date().getDay(); // 0=Sun, 1=Mon...
-  const currentIndex =
-    jsDay === 0 ? -1 : DAY_ORDER.findIndex((day) => day === DAY_ORDER[jsDay - 1]);
-
-  for (let offset = 1; offset <= 7; offset++) {
-    const nextDay = DAY_ORDER[(currentIndex + offset) % DAY_ORDER.length];
-    const classes = (timetable[nextDay] || []).filter((s) =>
-      String(s || "").trim() !== ""
-    );
-    if (classes.length > 0) {
-      return nextDay;
-    }
-  }
-
-  return null;
 }
 
 function getDaysStatus(
@@ -493,6 +520,7 @@ function getDaysStatus(
     (timetable[day] || []).filter((s) => String(s || "").trim() !== "").length;
 
   const activeDays = DAY_ORDER.filter((day) => getClassesForDay(day) > 0);
+
   if (activeDays.length === 0) return "No schedule";
 
   if (currentPct >= required) {
@@ -531,10 +559,33 @@ function getDaysStatus(
     recoveryDays += 1;
 
     const newPct = simulatedAttended / simulatedTotal;
+
     if (newPct >= required) break;
 
     pointer += 1;
   }
 
   return `${recoveryDays} days to recover`;
+}
+
+function getNextClassDay(timetable: Record<string, string[]>): string | null {
+  const now = new Date();
+
+  for (let i = 1; i <= 7; i++) {
+    const checkDay = new Date(now);
+    checkDay.setDate(now.getDate() + i);
+
+    const dayName = checkDay.toLocaleDateString("en-US", {
+      weekday: "long",
+    });
+
+    if (
+      timetable[dayName] &&
+      timetable[dayName].some((s) => s && String(s).trim())
+    ) {
+      return dayName;
+    }
+  }
+
+  return null;
 }

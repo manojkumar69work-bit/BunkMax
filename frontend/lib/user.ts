@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
-const API_BASE = "https://bunkmax.onrender.com";
+import { API_BASE } from "@/lib/api";
 
 export type AppUser = {
   id: number;
@@ -15,6 +14,17 @@ export type AppUser = {
   default_target: number;
 };
 
+// Validate cached user data
+function isValidCachedUser(data: any): data is AppUser {
+  return (
+    data &&
+    typeof data === "object" &&
+    typeof data.id === "number" &&
+    typeof data.name === "string" &&
+    typeof data.email === "string"
+  );
+}
+
 export function useAppUser() {
   const [appUser, setAppUser] = useState<AppUser | null>(null);
   const [loadingUser, setLoadingUser] = useState(true);
@@ -24,56 +34,105 @@ export function useAppUser() {
       try {
         setLoadingUser(true);
 
-        // ⚡ 1. Check cache first (INSTANT LOAD)
-        const cached = localStorage.getItem("bunkmax_user");
-        if (cached) {
-          setAppUser(JSON.parse(cached));
-          setLoadingUser(false);
-          return;
+        // Step 1: Check localStorage cache (but validate it)
+        try {
+          const cached = localStorage.getItem("bunkmax_user");
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (isValidCachedUser(parsed)) {
+              setAppUser(parsed);
+              // Don't return yet - still validate with server
+            }
+          }
+        } catch (e) {
+          // localStorage read or parse failed - clear it
+          localStorage.removeItem("bunkmax_user");
         }
 
-        // ⚡ 2. Get session
-        const sessionRes = await fetch("/api/auth/session", {
-          cache: "no-store",
-          credentials: "include",
-        });
+        // Step 2: Get session from NextAuth
+        let sessionRes: Response;
+        try {
+          sessionRes = await fetch("/api/auth/session", {
+            cache: "no-store",
+            credentials: "include",
+            signal: AbortSignal.timeout(10000), // 10 second timeout
+          });
+        } catch (e: any) {
+          if (e.name === "AbortError") {
+            throw new Error("Session check timeout");
+          }
+          throw e;
+        }
 
         if (!sessionRes.ok) {
           setAppUser(null);
+          localStorage.removeItem("bunkmax_user");
           return;
         }
 
-        const session = await sessionRes.json();
+        let session: any;
+        try {
+          session = await sessionRes.json();
+        } catch {
+          setAppUser(null);
+          localStorage.removeItem("bunkmax_user");
+          return;
+        }
+
         const email = session?.user?.email?.trim().toLowerCase();
 
         if (!email) {
           setAppUser(null);
+          localStorage.removeItem("bunkmax_user");
           return;
         }
 
-        // ⚡ 3. SINGLE request (NO RETRIES)
-        const res = await fetch(`${API_BASE}/auth/google-user`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email,
-            name: session?.user?.name || "Student",
-          }),
-        });
-
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || "Failed to load user");
+        // Step 3: Fetch user from backend
+        let backendRes: Response;
+        try {
+          backendRes = await fetch(`${API_BASE}/auth/google-user`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              email,
+              name: session?.user?.name || "Student",
+            }),
+            signal: AbortSignal.timeout(10000), // 10 second timeout
+          });
+        } catch (e: any) {
+          if (e.name === "AbortError") {
+            throw new Error(
+              "Authentication timeout - server took too long to respond"
+            );
+          }
+          throw e;
         }
 
-        const data = await res.json();
+        if (!backendRes.ok) {
+          const errorText = await backendRes.text().catch(() => "Unknown error");
+          throw new Error(
+            errorText || `Auth failed with status ${backendRes.status}`
+          );
+        }
 
-        // ⚡ 4. Save cache
+        let data: any;
+        try {
+          data = await backendRes.json();
+        } catch {
+          throw new Error("Invalid response from server");
+        }
+
+        // Validate backend response
+        if (!isValidCachedUser(data)) {
+          throw new Error("Invalid user data from server");
+        }
+
         setAppUser(data);
         localStorage.setItem("bunkmax_user", JSON.stringify(data));
-      } catch (err) {
-        console.error("useAppUser error:", err);
+      } catch (err: any) {
+        console.error("useAppUser error:", err?.message || err);
         setAppUser(null);
+        localStorage.removeItem("bunkmax_user");
       } finally {
         setLoadingUser(false);
       }
@@ -83,4 +142,9 @@ export function useAppUser() {
   }, []);
 
   return { appUser, loadingUser };
+}
+
+// Helper to clear user (for logout)
+export function clearUserCache() {
+  localStorage.removeItem("bunkmax_user");
 }

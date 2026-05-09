@@ -1,6 +1,69 @@
 export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
+  process.env.NEXT_PUBLIC_API_BASE ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "http://127.0.0.1:8000";
 
+// Request deduplication cache
+const pendingRequests = new Map<string, Promise<any>>();
+
+// Request timeout wrapper
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs: number = 10000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error: any) {
+    if (error.name === "AbortError") {
+      throw new Error("Request timeout - server took too long to respond");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Retry logic with exponential backoff
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  maxRetries: number = 2
+): Promise<Response> {
+  let lastError: any;
+
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      return await fetchWithTimeout(url, options);
+    } catch (error: any) {
+      lastError = error;
+
+      // Don't retry on client errors (4xx) or timeout errors
+      if (
+        error.message?.includes("timeout") ||
+        error.message?.includes("4")
+      ) {
+        throw error;
+      }
+
+      // Wait before retrying (exponential backoff)
+      if (i < maxRetries) {
+        const delay = Math.pow(2, i) * 1000; // 1s, 2s, 4s
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+// Response handler with better error messages
 async function handleResponse<T>(res: Response): Promise<T> {
   let data: any = null;
 
@@ -8,9 +71,11 @@ async function handleResponse<T>(res: Response): Promise<T> {
     data = await res.json();
   } catch {
     if (!res.ok) {
-      throw new Error(`Request failed with status ${res.status}`);
+      throw new Error(
+        `Server error ${res.status}: ${res.statusText || "Unknown error"}`
+      );
     }
-    throw new Error("Invalid server response");
+    throw new Error("Server returned invalid JSON response");
   }
 
   if (!res.ok) {
@@ -21,6 +86,14 @@ async function handleResponse<T>(res: Response): Promise<T> {
         ? data.message
         : Array.isArray(data?.detail)
         ? JSON.stringify(data.detail)
+        : res.status === 404
+        ? "Resource not found"
+        : res.status === 403
+        ? "Access denied"
+        : res.status === 400
+        ? "Invalid request"
+        : res.status >= 500
+        ? "Server error - please try again later"
         : JSON.stringify(data?.detail || data?.message || data);
 
     throw new Error(message || "Something went wrong");
@@ -29,10 +102,27 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return data;
 }
 
+// Deduplication wrapper - prevents duplicate requests
+async function fetchDeduped<T>(
+  key: string,
+  fetcher: () => Promise<T>
+): Promise<T> {
+  if (pendingRequests.has(key)) {
+    return pendingRequests.get(key)!;
+  }
+
+  const promise = fetcher().finally(() => {
+    pendingRequests.delete(key);
+  });
+
+  pendingRequests.set(key, promise);
+  return promise;
+}
+
 /* ---------------- USER ---------------- */
 
 export async function getUser(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}`);
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}`);
   return handleResponse<{
     id: number;
     name: string;
@@ -56,7 +146,7 @@ export async function updateUser(
   },
   userId: number
 ) {
-  const res = await fetch(`${API_BASE}/users/${userId}`, {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -66,7 +156,7 @@ export async function updateUser(
 }
 
 export async function clearAllUserData(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/clear-data`, {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/clear-data`, {
     method: "DELETE",
   });
 
@@ -76,24 +166,9 @@ export async function clearAllUserData(userId: number) {
 /* ---------------- DASHBOARD / HOME ---------------- */
 
 export async function getDashboard(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/dashboard`);
-  return handleResponse<{
-    current_avg: number;
-    overall_percentage: number;
-    total_present: number;
-    total_absent: number;
-    today_classes: {
-      period_no: number;
-      subject_name: string;
-      marked_status?: "present" | "absent" | null;
-    }[];
-  }>(res);
-}
-
-export async function getHomeData(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/home-data`);
-  return handleResponse<{
-    dashboard: {
+  return fetchDeduped(`dashboard-${userId}`, async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/dashboard`);
+    return handleResponse<{
       current_avg: number;
       overall_percentage: number;
       total_present: number;
@@ -103,17 +178,36 @@ export async function getHomeData(userId: number) {
         subject_name: string;
         marked_status?: "present" | "absent" | null;
       }[];
-    };
-    subjects: {
-      subject_name: string;
-      attended_classes: number;
-      total_classes: number;
-    }[];
-  }>(res);
+    }>(res);
+  });
+}
+
+export async function getHomeData(userId: number) {
+  return fetchDeduped(`home-data-${userId}`, async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/home-data`);
+    return handleResponse<{
+      dashboard: {
+        current_avg: number;
+        overall_percentage: number;
+        total_present: number;
+        total_absent: number;
+        today_classes: {
+          period_no: number;
+          subject_name: string;
+          marked_status?: "present" | "absent" | null;
+        }[];
+      };
+      subjects: {
+        subject_name: string;
+        attended_classes: number;
+        total_classes: number;
+      }[];
+    }>(res);
+  });
 }
 
 export async function getTomorrow(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/tomorrow`);
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/tomorrow`);
   return handleResponse<{
     title: string;
     new_overall: number;
@@ -124,7 +218,7 @@ export async function getTomorrow(userId: number) {
 }
 
 export async function getBestDay(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/best-day`);
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/best-day`);
   return handleResponse<{
     title: string;
     new_overall: number;
@@ -135,7 +229,7 @@ export async function getBestDay(userId: number) {
 }
 
 export async function getWorstDay(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/worst-day`);
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/worst-day`);
   return handleResponse<{
     title: string;
     new_overall: number;
@@ -153,7 +247,7 @@ export async function markAttendance(
   },
   userId: number
 ) {
-  const res = await fetch(`${API_BASE}/users/${userId}/mark-attendance`, {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/mark-attendance`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -171,11 +265,14 @@ export async function importAttendance(
   },
   userId: number
 ) {
-  const res = await fetch(`${API_BASE}/users/${userId}/import-attendance`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/import-attendance`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
 
   return handleResponse<{ message: string; subjects_imported?: number }>(res);
 }
@@ -183,12 +280,14 @@ export async function importAttendance(
 /* ---------------- SUBJECTS ---------------- */
 
 export async function getSubjects(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/subjects`);
-  const data = await handleResponse<any>(res);
+  return fetchDeduped(`subjects-${userId}`, async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subjects`);
+    const data = await handleResponse<any>(res);
 
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.subjects)) return data.subjects;
-  return [];
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data?.subjects)) return data.subjects;
+    return [];
+  });
 }
 
 export async function saveSubject(
@@ -200,7 +299,10 @@ export async function saveSubject(
   },
   userId: number
 ) {
-  const res = await fetch(`${API_BASE}/users/${userId}/subjects`, {
+  // Clear cache after save
+  pendingRequests.delete(`subjects-${userId}`);
+
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subjects`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -210,9 +312,15 @@ export async function saveSubject(
 }
 
 export async function deleteSubject(subjectId: number, userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/subjects/${subjectId}`, {
-    method: "DELETE",
-  });
+  // Clear cache after delete
+  pendingRequests.delete(`subjects-${userId}`);
+
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/subjects/${subjectId}`,
+    {
+      method: "DELETE",
+    }
+  );
 
   return handleResponse<{ message: string }>(res);
 }
@@ -228,13 +336,18 @@ function normalizeScheduleResponse(data: any) {
 }
 
 export async function getSchedule(userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/schedule`);
-  const data = await handleResponse<any>(res);
-  return normalizeScheduleResponse(data);
+  return fetchDeduped(`schedule-${userId}`, async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/schedule`);
+    const data = await handleResponse<any>(res);
+    return normalizeScheduleResponse(data);
+  });
 }
 
 export async function saveSchedule(payload: any, userId: number) {
-  const res = await fetch(`${API_BASE}/users/${userId}/schedule`, {
+  // Clear cache after save
+  pendingRequests.delete(`schedule-${userId}`);
+
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/schedule`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -264,7 +377,7 @@ export async function planBunks(
   },
   userId: number
 ) {
-  const res = await fetch(`${API_BASE}/users/${userId}/plan-bunks`, {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/plan-bunks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -290,11 +403,14 @@ export async function calendarPlan(
   },
   userId: number
 ) {
-  const res = await fetch(`${API_BASE}/users/${userId}/calendar-plan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/calendar-plan`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
 
   return handleResponse<{
     scenario_label: string;
