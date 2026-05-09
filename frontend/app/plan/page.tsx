@@ -54,20 +54,22 @@ function normalizeTimetable(data: any): Timetable {
   return map;
 }
 
+/* ✅ FIXED: Calendar now aligns with Mon Tue Wed Thu Fri Sat Sun */
 function generateCalendarDays(date: Date): (number | null)[] {
   const year = date.getFullYear();
   const month = date.getMonth();
 
-  // Get first day of month (0=Sunday, 1=Monday, etc.)
-  const firstDay = new Date(year, month, 1).getDay();
+  const jsFirstDay = new Date(year, month, 1).getDay(); 
+  // JS: 0 = Sunday, 1 = Monday, ..., 6 = Saturday
 
-  // Get number of days in month
+  const mondayFirstIndex = jsFirstDay === 0 ? 6 : jsFirstDay - 1;
+  // Calendar UI: 0 = Monday, ..., 6 = Sunday
+
   const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-  // Create array with nulls before month starts
   const days: (number | null)[] = [];
 
-  for (let i = 0; i < firstDay; i++) {
+  for (let i = 0; i < mondayFirstIndex; i++) {
     days.push(null);
   }
 
@@ -87,6 +89,7 @@ function formatDateString(day: number, month: number, year: number): string {
 function formatDateDisplay(dateStr: string): string {
   const [year, month, day] = dateStr.split("-");
   const date = new Date(`${year}-${month}-${day}T00:00:00`);
+
   return date.toLocaleDateString("en-GB", {
     day: "numeric",
     month: "short",
@@ -97,27 +100,23 @@ function formatDateDisplay(dateStr: string): string {
 export default function PlanPage() {
   const { appUser, loadingUser } = useAppUser();
 
-  // Data state
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [timetable, setTimetable] = useState<Timetable>({});
   const [loadingPage, setLoadingPage] = useState(true);
 
-  // Calendar state
   const [currentMonth, setCurrentMonth] = useState(new Date());
+
   const [selectedDates, setSelectedDates] = useState<
     Map<string, "present" | "absent">
   >(new Map());
 
-  // Modal state
   const [showDateModal, setShowDateModal] = useState(false);
-  const [selectedDateForModal, setSelectedDateForModal] = useState<Date | null>(
-    null
-  );
+  const [selectedDateForModal, setSelectedDateForModal] =
+    useState<Date | null>(null);
 
-  // Results state
-  const [calendarResult, setCalendarResult] = useState<CalendarResult | null>(
-    null
-  );
+  const [calendarResult, setCalendarResult] =
+    useState<CalendarResult | null>(null);
+
   const [runningPrediction, setRunningPrediction] = useState(false);
   const [error, setError] = useState("");
 
@@ -147,14 +146,18 @@ export default function PlanPage() {
 
   function previousMonth() {
     setCurrentMonth(
-      new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1)
+      new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1)
     );
+    setCalendarResult(null);
+    setError("");
   }
 
   function nextMonth() {
     setCurrentMonth(
-      new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1)
+      new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1)
     );
+    setCalendarResult(null);
+    setError("");
   }
 
   function handleDateClick(day: number) {
@@ -163,7 +166,9 @@ export default function PlanPage() {
       currentMonth.getMonth(),
       currentMonth.getFullYear()
     );
-    const dateObj = new Date(dateStr + "T00:00:00");
+
+    const dateObj = new Date(`${dateStr}T00:00:00`);
+
     setSelectedDateForModal(dateObj);
     setShowDateModal(true);
   }
@@ -171,39 +176,48 @@ export default function PlanPage() {
   function markDateStatus(status: "present" | "absent") {
     if (!selectedDateForModal) return;
 
-    const year = selectedDateForModal.getFullYear();
-    const month = selectedDateForModal.getMonth();
-    const day = selectedDateForModal.getDate();
-
-    const dateStr = formatDateString(day, month, year);
+    const dateStr = formatDateString(
+      selectedDateForModal.getDate(),
+      selectedDateForModal.getMonth(),
+      selectedDateForModal.getFullYear()
+    );
 
     const newMap = new Map(selectedDates);
     newMap.set(dateStr, status);
+
     setSelectedDates(newMap);
     setShowDateModal(false);
     setSelectedDateForModal(null);
+    setCalendarResult(null);
+    setError("");
   }
 
   function clearDateSelection() {
     if (!selectedDateForModal) return;
 
-    const year = selectedDateForModal.getFullYear();
-    const month = selectedDateForModal.getMonth();
-    const day = selectedDateForModal.getDate();
-
-    const dateStr = formatDateString(day, month, year);
+    const dateStr = formatDateString(
+      selectedDateForModal.getDate(),
+      selectedDateForModal.getMonth(),
+      selectedDateForModal.getFullYear()
+    );
 
     const newMap = new Map(selectedDates);
     newMap.delete(dateStr);
+
     setSelectedDates(newMap);
     setShowDateModal(false);
     setSelectedDateForModal(null);
+    setCalendarResult(null);
+    setError("");
   }
 
   function removeSelectedDate(dateStr: string) {
     const newMap = new Map(selectedDates);
     newMap.delete(dateStr);
+
     setSelectedDates(newMap);
+    setCalendarResult(null);
+    setError("");
   }
 
   async function handleRunPrediction() {
@@ -219,10 +233,12 @@ export default function PlanPage() {
       setError("");
       setCalendarResult(null);
 
-      const days = Array.from(selectedDates.entries()).map(([date, status]) => ({
-        date,
-        status,
-      }));
+      const days = Array.from(selectedDates.entries()).map(
+        ([date, status]) => ({
+          date,
+          status,
+        })
+      );
 
       const result = await calendarPlan({ days }, appUser.id);
 
@@ -244,6 +260,7 @@ export default function PlanPage() {
         <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
           <h1 className="text-2xl font-bold">BunkMax</h1>
           <p className="text-sm text-gray-300">Please login to continue.</p>
+
           <a
             href="/login"
             className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
@@ -260,6 +277,7 @@ export default function PlanPage() {
   }
 
   const calendarDays = generateCalendarDays(currentMonth);
+
   const monthName = currentMonth.toLocaleDateString("en-US", {
     month: "long",
     year: "numeric",
@@ -283,15 +301,19 @@ export default function PlanPage() {
       {/* Month Navigation */}
       <div className="flex items-center justify-between px-2">
         <button
+          type="button"
           onClick={previousMonth}
-          className="p-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition text-gray-300"
+          className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 text-gray-300 hover:bg-white/10 transition"
         >
           ←
         </button>
+
         <h2 className="text-lg font-semibold">{monthName}</h2>
+
         <button
+          type="button"
           onClick={nextMonth}
-          className="p-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition text-gray-300"
+          className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 text-gray-300 hover:bg-white/10 transition"
         >
           →
         </button>
@@ -300,7 +322,6 @@ export default function PlanPage() {
       {/* Calendar Grid */}
       <div className="soft-card p-4">
         <div className="grid grid-cols-7 gap-1">
-          {/* Weekday headers */}
           {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => (
             <div
               key={day}
@@ -310,7 +331,6 @@ export default function PlanPage() {
             </div>
           ))}
 
-          {/* Calendar days */}
           {calendarDays.map((day, idx) => {
             if (day === null) {
               return <div key={`empty-${idx}`} className="aspect-square" />;
@@ -321,31 +341,31 @@ export default function PlanPage() {
               currentMonth.getMonth(),
               currentMonth.getFullYear()
             );
+
             const isSelected = selectedDates.has(dateStr);
             const status = selectedDates.get(dateStr);
+
+            const today = new Date();
             const isToday =
-              new Date().getDate() === day &&
-              new Date().getMonth() === currentMonth.getMonth() &&
-              new Date().getFullYear() === currentMonth.getFullYear();
+              today.getDate() === day &&
+              today.getMonth() === currentMonth.getMonth() &&
+              today.getFullYear() === currentMonth.getFullYear();
 
             return (
               <button
-                key={day}
+                key={dateStr}
+                type="button"
                 onClick={() => handleDateClick(day)}
-                className={`
-                  aspect-square rounded-lg border transition
-                  flex flex-col items-center justify-center text-sm
-                  ${
-                    isSelected
-                      ? status === "present"
-                        ? "border-green-500/50 bg-green-500/15 text-green-200"
-                        : "border-red-500/50 bg-red-500/15 text-red-200"
-                      : "border-white/10 bg-white/5 text-white hover:bg-white/10"
-                  }
-                  ${isToday ? "ring-2 ring-blue-500/50" : ""}
-                `}
+                className={`aspect-square rounded-lg border transition flex flex-col items-center justify-center text-sm ${
+                  isSelected
+                    ? status === "present"
+                      ? "border-green-500/50 bg-green-500/15 text-green-200"
+                      : "border-red-500/50 bg-red-500/15 text-red-200"
+                    : "border-white/10 bg-white/5 text-white hover:bg-white/10"
+                } ${isToday ? "ring-2 ring-blue-500/50" : ""}`}
               >
                 <span className="font-semibold">{day}</span>
+
                 {isSelected && (
                   <span className="text-xs mt-0.5">
                     {status === "present" ? "✓" : "✗"}
@@ -357,14 +377,13 @@ export default function PlanPage() {
         </div>
       </div>
 
-      {/* Selected Dates Summary */}
       <SelectedDatesSummary
         dates={selectedDates}
         onRemove={removeSelectedDate}
       />
 
-      {/* Run Prediction Button */}
       <button
+        type="button"
         onClick={handleRunPrediction}
         disabled={runningPrediction || selectedDates.size === 0}
         className="primary-btn disabled:opacity-60"
@@ -372,17 +391,14 @@ export default function PlanPage() {
         {runningPrediction ? "Calculating..." : "Run Prediction"}
       </button>
 
-      {/* Results */}
       {calendarResult && <ResultsDisplay result={calendarResult} />}
 
-      {/* Skipped Dates */}
       {calendarResult && calendarResult.skipped_dates.length > 0 && (
         <SkippedDatesDisplay skipped={calendarResult.skipped_dates} />
       )}
 
       <BottomNav />
 
-      {/* Date Selection Modal */}
       {showDateModal && selectedDateForModal && (
         <DateSelectionModal
           date={selectedDateForModal}
@@ -409,8 +425,6 @@ export default function PlanPage() {
   );
 }
 
-// ========== COMPONENTS ==========
-
 function SelectedDatesSummary({
   dates,
   onRemove,
@@ -434,7 +448,10 @@ function SelectedDatesSummary({
 
   return (
     <div className="soft-card p-4 space-y-2">
-      <p className="text-sm font-semibold text-gray-300 mb-3">Selected Dates</p>
+      <p className="text-sm font-semibold text-gray-300 mb-3">
+        Selected Dates
+      </p>
+
       {dateArray.map(([dateStr, status]) => (
         <div
           key={dateStr}
@@ -450,7 +467,9 @@ function SelectedDatesSummary({
               {status === "present" ? "✓ Present" : "✗ Absent"}
             </p>
           </div>
+
           <button
+            type="button"
             onClick={() => onRemove(dateStr)}
             className="text-gray-400 hover:text-white transition text-lg font-bold"
           >
@@ -479,28 +498,33 @@ function ResultsDisplay({ result }: { result: CalendarResult }) {
           value={`${result.new_overall.toFixed(2)}%`}
           sub={formatChange(result.change_overall)}
         />
+
         <StatCard
           title="Overall Change"
-          value={`${result.change_overall > 0 ? "+" : ""}${result.change_overall.toFixed(
-            2
-          )}%`}
+          value={`${
+            result.change_overall > 0 ? "+" : ""
+          }${result.change_overall.toFixed(2)}%`}
         />
+
         <StatCard
           title="New Average"
           value={`${result.new_avg.toFixed(2)}%`}
           sub={formatChange(result.change_avg)}
         />
+
         <StatCard
           title="Average Change"
-          value={`${result.change_avg > 0 ? "+" : ""}${result.change_avg.toFixed(
-            2
-          )}%`}
+          value={`${
+            result.change_avg > 0 ? "+" : ""
+          }${result.change_avg.toFixed(2)}%`}
         />
       </div>
 
       <div className="rounded-lg border border-white/10 bg-white/5 p-3">
         <p className="text-xs text-gray-400">Simulated Sessions</p>
-        <p className="text-2xl font-bold mt-1">{result.simulated_sessions}</p>
+        <p className="text-2xl font-bold mt-1">
+          {result.simulated_sessions}
+        </p>
       </div>
     </div>
   );
@@ -536,13 +560,14 @@ function SkippedDatesDisplay({
       <p className="text-sm font-semibold text-gray-300 mb-3">
         ⚠️ Skipped Dates
       </p>
+
       {skipped.map(({ date, reason }) => (
         <div
-          key={date}
-          className="flex items-center justify-between text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5"
+          key={`${date}-${reason}`}
+          className="flex items-center justify-between gap-3 text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5"
         >
           <p className="text-gray-300">{formatDateDisplay(date)}</p>
-          <p className="text-xs text-gray-400">{reason}</p>
+          <p className="text-xs text-gray-400 text-right">{reason}</p>
         </div>
       ))}
     </div>
@@ -570,16 +595,12 @@ function DateSelectionModal({
 
   return (
     <>
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/50 z-40"
-        onClick={onClose}
-      />
+      <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
 
-      {/* Bottom Sheet */}
       <div className="fixed bottom-0 left-0 right-0 z-50 rounded-t-3xl border-t border-white/10 bg-[#0f172a] p-6 space-y-4">
         <div className="text-center">
           <p className="text-gray-400 text-sm">Selected Date</p>
+
           <p className="text-xl font-semibold mt-1">
             {date.toLocaleDateString("en-GB", {
               day: "numeric",
@@ -587,6 +608,7 @@ function DateSelectionModal({
               year: "numeric",
             })}
           </p>
+
           {currentStatus && (
             <p className="text-xs text-gray-400 mt-2">
               Currently:{" "}
@@ -598,6 +620,7 @@ function DateSelectionModal({
         </div>
 
         <button
+          type="button"
           onClick={onPresent}
           className="w-full px-4 py-3 rounded-2xl border border-green-500/30 bg-green-500/20 text-green-200 font-semibold hover:bg-green-500/30 transition"
         >
@@ -605,6 +628,7 @@ function DateSelectionModal({
         </button>
 
         <button
+          type="button"
           onClick={onAbsent}
           className="w-full px-4 py-3 rounded-2xl border border-red-500/30 bg-red-500/20 text-red-200 font-semibold hover:bg-red-500/30 transition"
         >
@@ -613,6 +637,7 @@ function DateSelectionModal({
 
         {currentStatus && (
           <button
+            type="button"
             onClick={onClear}
             className="w-full text-gray-400 hover:text-white transition py-2 text-sm font-medium"
           >
@@ -621,6 +646,7 @@ function DateSelectionModal({
         )}
 
         <button
+          type="button"
           onClick={onClose}
           className="w-full text-gray-400 text-sm py-2 font-medium"
         >
