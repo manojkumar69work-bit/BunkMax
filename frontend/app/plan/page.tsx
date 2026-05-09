@@ -1,12 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
-import { getSubjects, getTimetable, planBunks } from "@/lib/api";
+import { getSubjects, getTimetable, calendarPlan } from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 import FullScreenLoader from "@/components/FullScreenLoader";
-
-const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 type Subject = {
   id?: number;
@@ -18,20 +16,19 @@ type Subject = {
 
 type Timetable = Record<string, string[]>;
 
-type BunkResult = {
+type CalendarResult = {
   scenario_label: string;
+  current_overall: number;
   new_overall: number;
-  drop_overall: number;
+  change_overall: number;
+  current_avg: number;
   new_avg: number;
-  drop_avg: number;
-};
-
-type RecoveryResult = {
-  label: string;
-  new_overall: number;
-  increase_overall: number;
-  new_avg: number;
-  increase_avg: number;
+  change_avg: number;
+  simulated_sessions: number;
+  skipped_dates: Array<{
+    date: string;
+    reason: string;
+  }>;
 };
 
 function normalizeTimetable(data: any): Timetable {
@@ -57,46 +54,72 @@ function normalizeTimetable(data: any): Timetable {
   return map;
 }
 
-function calcOverall(subjects: Subject[]) {
-  const present = subjects.reduce((sum, s) => sum + (s.attended_classes || 0), 0);
-  const total = subjects.reduce((sum, s) => sum + (s.total_classes || 0), 0);
-  return total > 0 ? (present / total) * 100 : 0;
+function generateCalendarDays(date: Date): (number | null)[] {
+  const year = date.getFullYear();
+  const month = date.getMonth();
+
+  // Get first day of month (0=Sunday, 1=Monday, etc.)
+  const firstDay = new Date(year, month, 1).getDay();
+
+  // Get number of days in month
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  // Create array with nulls before month starts
+  const days: (number | null)[] = [];
+
+  for (let i = 0; i < firstDay; i++) {
+    days.push(null);
+  }
+
+  for (let i = 1; i <= daysInMonth; i++) {
+    days.push(i);
+  }
+
+  return days;
 }
 
-function calcAverage(subjects: Subject[]) {
-  const validSubjects = subjects.filter((s) => (s.total_classes || 0) > 0);
+function formatDateString(day: number, month: number, year: number): string {
+  const monthStr = String(month + 1).padStart(2, "0");
+  const dayStr = String(day).padStart(2, "0");
+  return `${year}-${monthStr}-${dayStr}`;
+}
 
-  if (validSubjects.length === 0) return 0;
-
-  const sum = validSubjects.reduce((acc, s) => {
-    return acc + (s.attended_classes / s.total_classes) * 100;
-  }, 0);
-
-  return sum / validSubjects.length;
+function formatDateDisplay(dateStr: string): string {
+  const [year, month, day] = dateStr.split("-");
+  const date = new Date(`${year}-${month}-${day}T00:00:00`);
+  return date.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
 }
 
 export default function PlanPage() {
   const { appUser, loadingUser } = useAppUser();
 
-  const [view, setView] = useState<"bunk" | "recovery">("bunk");
-
-  const [mode, setMode] = useState("tomorrow");
-  const [nDays, setNDays] = useState("");
-  const [weeks, setWeeks] = useState("1");
-  const [selectedDays, setSelectedDays] = useState<string[]>(["Monday"]);
-
-  const [bunkResult, setBunkResult] = useState<BunkResult | null>(null);
-  const [recoveryResult, setRecoveryResult] = useState<RecoveryResult | null>(null);
-
+  // Data state
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [timetable, setTimetable] = useState<Timetable>({});
-
   const [loadingPage, setLoadingPage] = useState(true);
-  const [runningBunk, setRunningBunk] = useState(false);
-  const [runningRecovery, setRunningRecovery] = useState(false);
 
+  // Calendar state
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [selectedDates, setSelectedDates] = useState<
+    Map<string, "present" | "absent">
+  >(new Map());
+
+  // Modal state
+  const [showDateModal, setShowDateModal] = useState(false);
+  const [selectedDateForModal, setSelectedDateForModal] = useState<Date | null>(
+    null
+  );
+
+  // Results state
+  const [calendarResult, setCalendarResult] = useState<CalendarResult | null>(
+    null
+  );
+  const [runningPrediction, setRunningPrediction] = useState(false);
   const [error, setError] = useState("");
-  const [recoveryDays, setRecoveryDays] = useState("");
 
   useEffect(() => {
     if (!appUser?.id) return;
@@ -122,134 +145,92 @@ export default function PlanPage() {
     }
   }
 
-  function toggleDay(day: string) {
-    setSelectedDays((prev) =>
-      prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]
+  function previousMonth() {
+    setCurrentMonth(
+      new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1)
     );
   }
 
-  const currentOverall = useMemo(() => calcOverall(subjects), [subjects]);
-  const currentAverage = useMemo(() => calcAverage(subjects), [subjects]);
+  function nextMonth() {
+    setCurrentMonth(
+      new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1)
+    );
+  }
 
-  async function handleRun() {
+  function handleDateClick(day: number) {
+    const dateStr = formatDateString(
+      day,
+      currentMonth.getMonth(),
+      currentMonth.getFullYear()
+    );
+    const dateObj = new Date(dateStr + "T00:00:00");
+    setSelectedDateForModal(dateObj);
+    setShowDateModal(true);
+  }
+
+  function markDateStatus(status: "present" | "absent") {
+    if (!selectedDateForModal) return;
+
+    const year = selectedDateForModal.getFullYear();
+    const month = selectedDateForModal.getMonth();
+    const day = selectedDateForModal.getDate();
+
+    const dateStr = formatDateString(day, month, year);
+
+    const newMap = new Map(selectedDates);
+    newMap.set(dateStr, status);
+    setSelectedDates(newMap);
+    setShowDateModal(false);
+    setSelectedDateForModal(null);
+  }
+
+  function clearDateSelection() {
+    if (!selectedDateForModal) return;
+
+    const year = selectedDateForModal.getFullYear();
+    const month = selectedDateForModal.getMonth();
+    const day = selectedDateForModal.getDate();
+
+    const dateStr = formatDateString(day, month, year);
+
+    const newMap = new Map(selectedDates);
+    newMap.delete(dateStr);
+    setSelectedDates(newMap);
+    setShowDateModal(false);
+    setSelectedDateForModal(null);
+  }
+
+  function removeSelectedDate(dateStr: string) {
+    const newMap = new Map(selectedDates);
+    newMap.delete(dateStr);
+    setSelectedDates(newMap);
+  }
+
+  async function handleRunPrediction() {
     if (!appUser?.id) return;
 
+    if (selectedDates.size === 0) {
+      setError("Please select at least one date.");
+      return;
+    }
+
     try {
-      setRunningBunk(true);
+      setRunningPrediction(true);
       setError("");
-      setBunkResult(null);
+      setCalendarResult(null);
 
-      let res: any;
+      const days = Array.from(selectedDates.entries()).map(([date, status]) => ({
+        date,
+        status,
+      }));
 
-      if (mode === "tomorrow") {
-        res = await planBunks({ mode: "tomorrow" }, appUser.id);
-      } else if (mode === "next_n_days") {
-        const parsed = Number(nDays);
-        if (!parsed || parsed <= 0) {
-          setError("Enter number of days.");
-          return;
-        }
+      const result = await calendarPlan({ days }, appUser.id);
 
-        res = await planBunks(
-          { mode: "next_n_days", n_days: parsed },
-          appUser.id
-        );
-      } else {
-        const parsedWeeks = Number(weeks || 1);
-
-        if (selectedDays.length === 0) {
-          setError("Select at least one day.");
-          return;
-        }
-
-        res = await planBunks(
-          {
-            mode: "selected_weekdays",
-            selected_days: selectedDays,
-            weeks: parsedWeeks > 0 ? parsedWeeks : 1,
-          },
-          appUser.id
-        );
-      }
-
-      setBunkResult({
-        scenario_label:
-          mode === "tomorrow" && typeof res.scenario_label === "string"
-            ? res.scenario_label.replace("Absent tomorrow", "Absent on next class day")
-            : res.scenario_label,
-        new_overall: Number(res.new_overall || 0),
-        drop_overall: Number(res.drop_overall || 0),
-        new_avg: Number(res.new_avg || 0),
-        drop_avg: Number(res.drop_avg || 0),
-      });
+      setCalendarResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to run prediction");
     } finally {
-      setRunningBunk(false);
-    }
-  }
-
-  async function runRecovery() {
-    try {
-      setRunningRecovery(true);
-      setError("");
-      setRecoveryResult(null);
-
-      const parsedDays = Number(recoveryDays);
-      if (!parsedDays || parsedDays <= 0) {
-        setError("Enter number of recovery days.");
-        return;
-      }
-
-      if (subjects.length === 0) {
-        setError("Add subjects first.");
-        return;
-      }
-
-      const dayOrder = DAYS.filter((day) =>
-        (timetable[day] || []).some((s) => String(s || "").trim() !== "")
-      );
-
-      if (dayOrder.length === 0) {
-        setError("Create your schedule first.");
-        return;
-      }
-
-      const simulated: Subject[] = subjects.map((s) => ({ ...s }));
-
-      for (let i = 0; i < parsedDays; i++) {
-        const day = dayOrder[i % dayOrder.length];
-        const periods = timetable[day] || [];
-
-        for (const subjectName of periods) {
-          const clean = String(subjectName || "").trim();
-          if (!clean) continue;
-
-          const subject = simulated.find(
-            (s) => s.subject_name.trim().toLowerCase() === clean.toLowerCase()
-          );
-
-          if (subject) {
-            subject.attended_classes += 1;
-            subject.total_classes += 1;
-          }
-        }
-      }
-
-      const newOverall = calcOverall(simulated);
-      const newAvg = calcAverage(simulated);
-
-      setRecoveryResult({
-        label: `Recovery for ${parsedDays} consecutive days`,
-        new_overall: Number(newOverall.toFixed(2)),
-        increase_overall: Number((newOverall - currentOverall).toFixed(2)),
-        new_avg: Number(newAvg.toFixed(2)),
-        increase_avg: Number((newAvg - currentAverage).toFixed(2)),
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to calculate recovery");
-    } finally {
-      setRunningRecovery(false);
+      setRunningPrediction(false);
     }
   }
 
@@ -278,12 +259,18 @@ export default function PlanPage() {
     return <FullScreenLoader label="Loading planner..." />;
   }
 
+  const calendarDays = generateCalendarDays(currentMonth);
+  const monthName = currentMonth.toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
+
   return (
     <div className="app-shell">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Plan My Bunks</h1>
         <p className="text-sm text-gray-400 mt-1">
-          Predict bunk impact and plan attendance recovery
+          Select dates and predict your attendance.
         </p>
       </div>
 
@@ -293,193 +280,233 @@ export default function PlanPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3">
+      {/* Month Navigation */}
+      <div className="flex items-center justify-between px-2">
         <button
-          type="button"
-          onClick={() => {
-            setView("bunk");
-            setError("");
-          }}
-          className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition ${
-            view === "bunk"
-              ? "border-white/20 bg-white/15 text-white"
-              : "border-white/10 bg-white/5 text-gray-300"
-          }`}
+          onClick={previousMonth}
+          className="p-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition text-gray-300"
         >
-          Bunk Impact
+          ←
         </button>
-
+        <h2 className="text-lg font-semibold">{monthName}</h2>
         <button
-          type="button"
-          onClick={() => {
-            setView("recovery");
-            setError("");
-          }}
-          className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition ${
-            view === "recovery"
-              ? "border-white/20 bg-white/15 text-white"
-              : "border-white/10 bg-white/5 text-gray-300"
-          }`}
+          onClick={nextMonth}
+          className="p-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition text-gray-300"
         >
-          Recovery
+          →
         </button>
       </div>
 
-      {view === "bunk" ? (
-        <>
-          <div className="soft-card p-4 space-y-3">
-            <select
-              value={mode}
-              onChange={(e) => {
-                setMode(e.target.value);
-                setBunkResult(null);
-                setError("");
-              }}
-              className="input-ui"
+      {/* Calendar Grid */}
+      <div className="soft-card p-4">
+        <div className="grid grid-cols-7 gap-1">
+          {/* Weekday headers */}
+          {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => (
+            <div
+              key={day}
+              className="text-xs font-semibold text-gray-400 text-center py-2"
             >
-              <option value="tomorrow">Absent on next class day</option>
-              <option value="next_n_days">Absent for next N class days</option>
-              <option value="selected_weekdays">Absent on selected weekdays</option>
-            </select>
-
-            {mode === "next_n_days" && (
-              <input
-                type="number"
-                value={nDays}
-                onChange={(e) => setNDays(e.target.value)}
-                className="input-ui"
-                placeholder="Enter number"
-              />
-            )}
-
-            {mode === "selected_weekdays" && (
-              <>
-                <div className="grid grid-cols-2 gap-2">
-                  {DAYS.map((day) => (
-                    <button
-                      key={day}
-                      type="button"
-                      onClick={() => toggleDay(day)}
-                      className={`rounded-xl border px-3 py-2 text-sm font-medium ${
-                        selectedDays.includes(day)
-                          ? "border-white/20 bg-white/15 text-white"
-                          : "border-white/10 bg-white/5 text-gray-300"
-                      }`}
-                    >
-                      {day}
-                    </button>
-                  ))}
-                </div>
-
-                <input
-                  type="number"
-                  value={weeks}
-                  onChange={(e) => setWeeks(e.target.value)}
-                  className="input-ui"
-                  placeholder="Enter number"
-                />
-              </>
-            )}
-
-            <button
-              onClick={handleRun}
-              disabled={runningBunk}
-              className="primary-btn disabled:opacity-60"
-            >
-              {runningBunk ? "Running Prediction..." : "Run Prediction"}
-            </button>
-          </div>
-
-          {bunkResult && (
-            <div className="glass-card p-4 space-y-3">
-              <p className="font-semibold">{bunkResult.scenario_label}</p>
-
-              <div className="grid grid-cols-2 gap-2">
-                <MiniStatCard
-                  title="New Overall"
-                  value={`${bunkResult.new_overall.toFixed(2)}%`}
-                  sub={`Drop ${bunkResult.drop_overall.toFixed(2)}%`}
-                />
-                <MiniStatCard
-                  title="Drop in Overall"
-                  value={`${bunkResult.drop_overall.toFixed(2)}%`}
-                />
-                <MiniStatCard
-                  title="New Avg"
-                  value={`${bunkResult.new_avg.toFixed(2)}%`}
-                  sub={`Drop ${bunkResult.drop_avg.toFixed(2)}%`}
-                />
-                <MiniStatCard
-                  title="Drop in Avg"
-                  value={`${bunkResult.drop_avg.toFixed(2)}%`}
-                />
-              </div>
+              {day}
             </div>
-          )}
-        </>
-      ) : (
-        <>
-          {subjects.length === 0 ? (
-            <div className="glass-card p-4 text-sm text-gray-400">
-              Add your subjects first to see recovery suggestions.
-            </div>
-          ) : (
-            <>
-              <div className="soft-card p-4 space-y-3">
-                <input
-                  type="number"
-                  value={recoveryDays}
-                  onChange={(e) => setRecoveryDays(e.target.value)}
-                  className="input-ui"
-                  placeholder="Enter number of days"
-                />
+          ))}
 
-                <button
-                  onClick={runRecovery}
-                  disabled={runningRecovery}
-                  className="primary-btn disabled:opacity-60"
-                >
-                  {runningRecovery ? "Calculating..." : "Calculate Recovery"}
-                </button>
-              </div>
+          {/* Calendar days */}
+          {calendarDays.map((day, idx) => {
+            if (day === null) {
+              return <div key={`empty-${idx}`} className="aspect-square" />;
+            }
 
-              {recoveryResult && (
-                <div className="glass-card p-4 space-y-3">
-                  <p className="font-semibold">{recoveryResult.label}</p>
+            const dateStr = formatDateString(
+              day,
+              currentMonth.getMonth(),
+              currentMonth.getFullYear()
+            );
+            const isSelected = selectedDates.has(dateStr);
+            const status = selectedDates.get(dateStr);
+            const isToday =
+              new Date().getDate() === day &&
+              new Date().getMonth() === currentMonth.getMonth() &&
+              new Date().getFullYear() === currentMonth.getFullYear();
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <MiniStatCard
-                      title="New Overall"
-                      value={`${recoveryResult.new_overall.toFixed(2)}%`}
-                      sub={`+${recoveryResult.increase_overall.toFixed(2)}%`}
-                    />
-                    <MiniStatCard
-                      title="Increase in Overall"
-                      value={`+${recoveryResult.increase_overall.toFixed(2)}%`}
-                    />
-                    <MiniStatCard
-                      title="New Avg"
-                      value={`${recoveryResult.new_avg.toFixed(2)}%`}
-                      sub={`+${recoveryResult.increase_avg.toFixed(2)}%`}
-                    />
-                    <MiniStatCard
-                      title="Increase in Avg"
-                      value={`+${recoveryResult.increase_avg.toFixed(2)}%`}
-                    />
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </>
+            return (
+              <button
+                key={day}
+                onClick={() => handleDateClick(day)}
+                className={`
+                  aspect-square rounded-lg border transition
+                  flex flex-col items-center justify-center text-sm
+                  ${
+                    isSelected
+                      ? status === "present"
+                        ? "border-green-500/50 bg-green-500/15 text-green-200"
+                        : "border-red-500/50 bg-red-500/15 text-red-200"
+                      : "border-white/10 bg-white/5 text-white hover:bg-white/10"
+                  }
+                  ${isToday ? "ring-2 ring-blue-500/50" : ""}
+                `}
+              >
+                <span className="font-semibold">{day}</span>
+                {isSelected && (
+                  <span className="text-xs mt-0.5">
+                    {status === "present" ? "✓" : "✗"}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Selected Dates Summary */}
+      <SelectedDatesSummary
+        dates={selectedDates}
+        onRemove={removeSelectedDate}
+      />
+
+      {/* Run Prediction Button */}
+      <button
+        onClick={handleRunPrediction}
+        disabled={runningPrediction || selectedDates.size === 0}
+        className="primary-btn disabled:opacity-60"
+      >
+        {runningPrediction ? "Calculating..." : "Run Prediction"}
+      </button>
+
+      {/* Results */}
+      {calendarResult && <ResultsDisplay result={calendarResult} />}
+
+      {/* Skipped Dates */}
+      {calendarResult && calendarResult.skipped_dates.length > 0 && (
+        <SkippedDatesDisplay skipped={calendarResult.skipped_dates} />
       )}
 
       <BottomNav />
+
+      {/* Date Selection Modal */}
+      {showDateModal && selectedDateForModal && (
+        <DateSelectionModal
+          date={selectedDateForModal}
+          isOpen={showDateModal}
+          onClose={() => {
+            setShowDateModal(false);
+            setSelectedDateForModal(null);
+          }}
+          onPresent={() => markDateStatus("present")}
+          onAbsent={() => markDateStatus("absent")}
+          onClear={clearDateSelection}
+          currentStatus={
+            selectedDates.get(
+              formatDateString(
+                selectedDateForModal.getDate(),
+                selectedDateForModal.getMonth(),
+                selectedDateForModal.getFullYear()
+              )
+            ) || undefined
+          }
+        />
+      )}
     </div>
   );
 }
 
-function MiniStatCard({
+// ========== COMPONENTS ==========
+
+function SelectedDatesSummary({
+  dates,
+  onRemove,
+}: {
+  dates: Map<string, "present" | "absent">;
+  onRemove: (dateStr: string) => void;
+}) {
+  const dateArray = Array.from(dates.entries()).sort(([a], [b]) =>
+    a.localeCompare(b)
+  );
+
+  if (dateArray.length === 0) {
+    return (
+      <div className="glass-card p-4">
+        <p className="text-gray-400 text-sm text-center">
+          No dates selected yet.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="soft-card p-4 space-y-2">
+      <p className="text-sm font-semibold text-gray-300 mb-3">Selected Dates</p>
+      {dateArray.map(([dateStr, status]) => (
+        <div
+          key={dateStr}
+          className="flex items-center justify-between p-3 rounded-lg border border-white/10 bg-white/5"
+        >
+          <div>
+            <p className="text-sm font-medium">{formatDateDisplay(dateStr)}</p>
+            <p
+              className={`text-xs ${
+                status === "present" ? "text-green-300" : "text-red-300"
+              }`}
+            >
+              {status === "present" ? "✓ Present" : "✗ Absent"}
+            </p>
+          </div>
+          <button
+            onClick={() => onRemove(dateStr)}
+            className="text-gray-400 hover:text-white transition text-lg font-bold"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ResultsDisplay({ result }: { result: CalendarResult }) {
+  function formatChange(change: number) {
+    if (change > 0) return `Gain +${change.toFixed(2)}%`;
+    if (change < 0) return `Drop ${Math.abs(change).toFixed(2)}%`;
+    return "No change";
+  }
+
+  return (
+    <div className="glass-card p-4 space-y-3">
+      <p className="font-semibold text-gray-200">{result.scenario_label}</p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <StatCard
+          title="New Overall"
+          value={`${result.new_overall.toFixed(2)}%`}
+          sub={formatChange(result.change_overall)}
+        />
+        <StatCard
+          title="Overall Change"
+          value={`${result.change_overall > 0 ? "+" : ""}${result.change_overall.toFixed(
+            2
+          )}%`}
+        />
+        <StatCard
+          title="New Average"
+          value={`${result.new_avg.toFixed(2)}%`}
+          sub={formatChange(result.change_avg)}
+        />
+        <StatCard
+          title="Average Change"
+          value={`${result.change_avg > 0 ? "+" : ""}${result.change_avg.toFixed(
+            2
+          )}%`}
+        />
+      </div>
+
+      <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+        <p className="text-xs text-gray-400">Simulated Sessions</p>
+        <p className="text-2xl font-bold mt-1">{result.simulated_sessions}</p>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({
   title,
   value,
   sub,
@@ -489,10 +516,117 @@ function MiniStatCard({
   sub?: string;
 }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-      <p className="text-[11px] text-gray-400">{title}</p>
+    <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+      <p className="text-xs text-gray-400">{title}</p>
       <p className="text-lg font-bold mt-1">{value}</p>
-      {sub ? <p className="text-[11px] text-gray-400 mt-1">{sub}</p> : null}
+      {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
     </div>
+  );
+}
+
+function SkippedDatesDisplay({
+  skipped,
+}: {
+  skipped: Array<{ date: string; reason: string }>;
+}) {
+  if (!skipped || skipped.length === 0) return null;
+
+  return (
+    <div className="soft-card p-4 space-y-2">
+      <p className="text-sm font-semibold text-gray-300 mb-3">
+        ⚠️ Skipped Dates
+      </p>
+      {skipped.map(({ date, reason }) => (
+        <div
+          key={date}
+          className="flex items-center justify-between text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5"
+        >
+          <p className="text-gray-300">{formatDateDisplay(date)}</p>
+          <p className="text-xs text-gray-400">{reason}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DateSelectionModal({
+  date,
+  isOpen,
+  onClose,
+  onPresent,
+  onAbsent,
+  onClear,
+  currentStatus,
+}: {
+  date: Date;
+  isOpen: boolean;
+  onClose: () => void;
+  onPresent: () => void;
+  onAbsent: () => void;
+  onClear: () => void;
+  currentStatus?: "present" | "absent";
+}) {
+  if (!isOpen) return null;
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 bg-black/50 z-40"
+        onClick={onClose}
+      />
+
+      {/* Bottom Sheet */}
+      <div className="fixed bottom-0 left-0 right-0 z-50 rounded-t-3xl border-t border-white/10 bg-[#0f172a] p-6 space-y-4">
+        <div className="text-center">
+          <p className="text-gray-400 text-sm">Selected Date</p>
+          <p className="text-xl font-semibold mt-1">
+            {date.toLocaleDateString("en-GB", {
+              day: "numeric",
+              month: "long",
+              year: "numeric",
+            })}
+          </p>
+          {currentStatus && (
+            <p className="text-xs text-gray-400 mt-2">
+              Currently:{" "}
+              <span className="font-semibold">
+                {currentStatus === "present" ? "Present" : "Absent"}
+              </span>
+            </p>
+          )}
+        </div>
+
+        <button
+          onClick={onPresent}
+          className="w-full px-4 py-3 rounded-2xl border border-green-500/30 bg-green-500/20 text-green-200 font-semibold hover:bg-green-500/30 transition"
+        >
+          Mark Present ✓
+        </button>
+
+        <button
+          onClick={onAbsent}
+          className="w-full px-4 py-3 rounded-2xl border border-red-500/30 bg-red-500/20 text-red-200 font-semibold hover:bg-red-500/30 transition"
+        >
+          Mark Absent ✗
+        </button>
+
+        {currentStatus && (
+          <button
+            onClick={onClear}
+            className="w-full text-gray-400 hover:text-white transition py-2 text-sm font-medium"
+          >
+            Clear Selection
+          </button>
+        )}
+
+        <button
+          onClick={onClose}
+          className="w-full text-gray-400 text-sm py-2 font-medium"
+        >
+          Close
+        </button>
+      </div>
+    </>
   );
 }

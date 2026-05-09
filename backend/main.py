@@ -66,6 +66,15 @@ class PlanPayload(BaseModel):
     selected_days: Optional[list[str]] = None
 
 
+class CalendarPlanDay(BaseModel):
+    date: str  # ISO format: YYYY-MM-DD
+    status: Literal["present", "absent"]
+
+
+class CalendarPlanPayload(BaseModel):
+    days: list[CalendarPlanDay]
+
+
 # ---------------------------
 # HELPERS
 # ---------------------------
@@ -944,4 +953,118 @@ def plan_bunks(user_id: int, payload: PlanPayload):
         "drop_overall": round(current_overall - new_overall, 2),
         "new_avg": round(new_avg, 2),
         "drop_avg": round(current_avg - new_avg, 2),
+    }
+
+
+# ---------------------------
+# CALENDAR PLAN
+# ---------------------------
+
+@app.post("/users/{user_id}/calendar-plan")
+def calendar_plan(user_id: int, payload: CalendarPlanPayload):
+    """
+    Simulate attendance for user-selected dates.
+    Prediction only - does not update database.
+    """
+    
+    # Validate input
+    if not payload.days:
+        raise HTTPException(status_code=400, detail="At least one date is required")
+    
+    # Load current data
+    subjects = load_subjects_minimal(user_id)
+    timetable_rows = load_timetable_rows(user_id)
+    day_map = build_day_map(timetable_rows)
+    
+    # Calculate current metrics
+    current_overall = calc_overall(subjects)
+    current_avg = calc_avg(subjects)
+    
+    # Create simulation (deep copy)
+    simulated = [
+        {
+            "subject_name": s["subject_name"],
+            "attended_classes": int(s.get("attended_classes") or 0),
+            "total_classes": int(s.get("total_classes") or 0),
+        }
+        for s in subjects
+    ]
+    
+    # Weekday names for conversion
+    WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    total_simulated_sessions = 0
+    skipped_dates = []
+    
+    # Process each selected date
+    for day_plan in payload.days:
+        try:
+            # Parse date
+            date_obj = datetime.strptime(day_plan.date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {day_plan.date}")
+        
+        # Get weekday (0=Monday, 6=Sunday)
+        weekday_num = date_obj.weekday()
+        
+        # Skip Sunday
+        if weekday_num == 6:
+            skipped_dates.append({
+                "date": day_plan.date,
+                "reason": "No classes (Sunday)"
+            })
+            continue
+        
+        # Get weekday name
+        weekday_name = WEEKDAY_NAMES[weekday_num]
+        
+        # Get classes for this day
+        classes_today = day_map.get(weekday_name, [])
+        
+        # Skip if no classes
+        if not classes_today or all(not str(c or "").strip() for c in classes_today):
+            skipped_dates.append({
+                "date": day_plan.date,
+                "reason": "No classes scheduled"
+            })
+            continue
+        
+        # Apply status to each class
+        for class_name in classes_today:
+            clean_class = str(class_name or "").strip()
+            if not clean_class:
+                continue
+            
+            # Find subject in simulated
+            subject = None
+            for s in simulated:
+                if s["subject_name"].strip().lower() == clean_class.lower():
+                    subject = s
+                    break
+            
+            if not subject:
+                # Subject in timetable but not in subjects table - skip safely
+                continue
+            
+            # Update counts
+            subject["total_classes"] += 1
+            total_simulated_sessions += 1
+            
+            if day_plan.status == "present":
+                subject["attended_classes"] += 1
+    
+    # Calculate new metrics
+    new_overall = calc_overall(simulated)
+    new_avg = calc_avg(simulated)
+    
+    return {
+        "scenario_label": "Calendar Prediction",
+        "current_overall": round(current_overall, 2),
+        "new_overall": round(new_overall, 2),
+        "change_overall": round(new_overall - current_overall, 2),
+        "current_avg": round(current_avg, 2),
+        "new_avg": round(new_avg, 2),
+        "change_avg": round(new_avg - current_avg, 2),
+        "simulated_sessions": total_simulated_sessions,
+        "skipped_dates": skipped_dates,
     }

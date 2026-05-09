@@ -278,3 +278,36 @@ export async function planBunks(
     drop_avg: number;
   }>(res);
 }
+
+/* ---------------- CALENDAR PLAN ---------------- */
+
+export async function calendarPlan(
+  payload: {
+    days: Array<{
+      date: string;
+      status: "present" | "absent";
+    }>;
+  },
+  userId: number
+) {
+  const res = await fetch(`${API_BASE}/users/${userId}/calendar-plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  return handleResponse<{
+    scenario_label: string;
+    current_overall: number;
+    new_overall: number;
+    change_overall: number;
+    current_avg: number;
+    new_avg: number;
+    change_avg: number;
+    simulated_sessions: number;
+    skipped_dates: Array<{
+      date: string;
+      reason: string;
+    }>;
+  }>(res);
+}
