@@ -1,107 +1,77 @@
 import os
 import logging
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from psycopg2.pool import ThreadedConnectionPool
+from pathlib import Path
+from dotenv import load_dotenv
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import QueuePool
+
+# ---------------------------
+# 1. LOAD ENVIRONMENT
+# ---------------------------
+# This ensures the .env file is found even if uvicorn is started from a different folder
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 logger = logging.getLogger("database")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# ---------------------------
+# 2. DATABASE URL SETUP
+# ---------------------------
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 if not DATABASE_URL:
+    # This will help you debug if the .env isn't being read
+    print(f"CRITICAL: No DATABASE_URL found. Checked at: {env_path}")
     raise RuntimeError("DATABASE_URL environment variable is missing")
 
+# SQLAlchemy Async requires 'postgresql+asyncpg' or 'postgresql+asyncpg'
+# We fix the common Supabase/Render 'postgres://' or 'postgresql://' prefixes here
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-class PooledConnection:
+# ---------------------------
+# 3. ASYNC ENGINE CONFIG
+# ---------------------------
+engine = create_async_engine(
+    DATABASE_URL,
+    # Removed pool_class=QueuePool to fix the TypeError
+    pool_size=10,         
+    max_overflow=5,       
+    pool_timeout=30,      
+    pool_recycle=1800,    
+    pool_pre_ping=True,   
+    echo=False            
+)
+
+# ---------------------------
+# 4. SESSION FACTORY
+# ---------------------------
+async_session = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False
+)
+
+# ---------------------------
+# 5. FASTAPI DEPENDENCY
+# ---------------------------
+async def get_db():
     """
-    Wrapper around a psycopg2 pooled connection.
-
-    This allows existing code like:
-        conn = get_conn()
+    Dependency to be used in FastAPI routes.
+    Example: 
+    @app.get("/")
+    async def index(db: AsyncSession = Depends(get_db)):
         ...
-        conn.close()
-
-    to keep working, while internally returning the connection
-    back to the pool instead of actually closing it.
     """
-
-    def __init__(self, raw_conn, pool: ThreadedConnectionPool):
-        self._raw_conn = raw_conn
-        self._pool = pool
-        self._returned = False
-
-    def cursor(self, *args, **kwargs):
-        if "cursor_factory" not in kwargs:
-            kwargs["cursor_factory"] = RealDictCursor
-        return self._raw_conn.cursor(*args, **kwargs)
-
-    def commit(self):
-        return self._raw_conn.commit()
-
-    def rollback(self):
-        return self._raw_conn.rollback()
-
-    def close(self):
-        if self._returned:
-            return
-
+    async with async_session() as session:
         try:
-            if not self._raw_conn.closed:
-                self._pool.putconn(self._raw_conn)
+            yield session
         except Exception as e:
-            logger.exception("Failed to return connection to pool: %s", e)
+            logger.error(f"Database session error: {e}")
+            await session.rollback()
+            raise
         finally:
-            self._returned = True
-
-    def __getattr__(self, name):
-        return getattr(self._raw_conn, name)
-
-
-# Keep pool small for Render/free DBs.
-# Too large can exhaust PostgreSQL plan limits.
-MIN_CONN = int(os.getenv("DB_POOL_MIN", "1"))
-MAX_CONN = int(os.getenv("DB_POOL_MAX", "5"))
-
-try:
-    connection_pool = ThreadedConnectionPool(
-        MIN_CONN,
-        MAX_CONN,
-        dsn=DATABASE_URL,
-        cursor_factory=RealDictCursor,
-    )
-    logger.info("Database connection pool created: min=%s max=%s", MIN_CONN, MAX_CONN)
-except Exception as e:
-    logger.exception("Failed to create database connection pool")
-    raise RuntimeError(f"Failed to create database connection pool: {e}")
-
-
-def get_conn():
-    """
-    Get a database connection from the pool.
-
-    IMPORTANT:
-    Call conn.close() when done.
-    This wrapper returns it to the pool.
-    """
-    try:
-        raw_conn = connection_pool.getconn()
-
-        if raw_conn.closed:
-            raw_conn = psycopg2.connect(
-                DATABASE_URL,
-                cursor_factory=RealDictCursor,
-            )
-
-        return PooledConnection(raw_conn, connection_pool)
-
-    except Exception as e:
-        logger.exception("Failed to get connection from pool")
-        raise Exception(f"Database connection failed: {e}")
-
-
-def close_all_connections():
-    try:
-        connection_pool.closeall()
-        logger.info("All database connections closed")
-    except Exception as e:
-        logger.exception("Failed to close database connection pool: %s", e)
+            await session.close()
