@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { API_BASE } from "@/lib/api";
 
 export type AppUser = {
   id: number;
@@ -14,8 +13,12 @@ export type AppUser = {
   default_target: number;
 };
 
-function normalizeUser(data: any): AppUser | null {
-  if (!data || typeof data !== "object") return null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeUser(data: unknown): AppUser | null {
+  if (!isRecord(data)) return null;
 
   const id = Number(data.id);
 
@@ -63,73 +66,32 @@ export function useAppUser() {
       try {
         setLoadingUser(true);
 
-        const sessionRes = await fetch("/api/auth/session", {
+        const res = await fetch("/api/me", {
           cache: "no-store",
           credentials: "include",
         });
 
-        if (!sessionRes.ok) {
+        if (!res.ok) {
           if (!cachedUser) {
             setAppUser(null);
             localStorage.removeItem("bunkmax_user");
           }
+
           return;
         }
 
-        const session = await sessionRes.json();
-        const email = session?.user?.email?.trim().toLowerCase();
+        const data = await res.json();
+        const normalized = normalizeUser(data);
 
-        if (!email) {
-          setAppUser(null);
-          localStorage.removeItem("bunkmax_user");
-          return;
+        if (!normalized) {
+          throw new Error("Invalid user data from server");
         }
 
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-        try {
-          const backendRes = await fetch(`${API_BASE}/auth/google-user`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              email,
-              name: session?.user?.name || "Student",
-            }),
-            signal: controller.signal,
-          });
-
-          clearTimeout(timeoutId);
-
-          if (!backendRes.ok) {
-            const errorText = await backendRes.text().catch(() => "");
-            throw new Error(errorText || `Auth failed: ${backendRes.status}`);
-          }
-
-          const data = await backendRes.json();
-          const normalized = normalizeUser(data);
-
-          if (!normalized) {
-            throw new Error("Invalid user data from server");
-          }
-
-          if (mounted) {
-            setAppUser(normalized);
-          }
-
-          localStorage.setItem("bunkmax_user", JSON.stringify(normalized));
-        } catch (backendError) {
-          clearTimeout(timeoutId);
-
-          console.error("Backend auth failed:", backendError);
-
-          if (cachedUser && mounted) {
-            setAppUser(cachedUser);
-            return;
-          }
-
-          throw backendError;
+        if (mounted) {
+          setAppUser(normalized);
         }
+
+        localStorage.setItem("bunkmax_user", JSON.stringify(normalized));
       } catch (err) {
         console.error("useAppUser error:", err);
 

@@ -1,0 +1,155 @@
+import { auth } from "@/auth";
+import { NextRequest } from "next/server";
+
+const API_BASE =
+  process.env.BACKEND_API_BASE ||
+  process.env.NEXT_PUBLIC_API_BASE ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "http://127.0.0.1:8000";
+
+const SERVICE_SECRET = process.env.BACKEND_API_SECRET || "";
+
+type AppUser = {
+  id: number;
+  email?: string;
+  name: string;
+  college: string;
+  branch: string;
+  semester: string;
+  section: string;
+  default_target: number;
+};
+
+type RouteContext = {
+  params: Promise<{
+    path?: string[];
+  }>;
+};
+
+function backendUrl(path: string[], search: string) {
+  const base = API_BASE.replace(/\/$/, "");
+  const joinedPath = path.map(encodeURIComponent).join("/");
+  return `${base}/${joinedPath}${search}`;
+}
+
+async function syncCurrentUser(): Promise<AppUser | Response> {
+  const session = await auth();
+
+  const email = session?.user?.email?.trim().toLowerCase();
+  const name = session?.user?.name || "Student";
+
+  if (!email) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!SERVICE_SECRET) {
+    return Response.json(
+      { error: "Backend service secret is missing" },
+      { status: 500 }
+    );
+  }
+
+  const res = await fetch(`${API_BASE}/auth/google-user`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-bunkmax-service-secret": SERVICE_SECRET,
+    },
+    body: JSON.stringify({
+      email,
+      name,
+    }),
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    return Response.json(
+      { error: "Failed to sync user", details: text },
+      { status: res.status }
+    );
+  }
+
+  return res.json();
+}
+
+function requestedUserId(path: string[]) {
+  if (path[0] !== "users") return null;
+
+  const id = Number(path[1]);
+
+  if (!Number.isFinite(id) || id <= 0) {
+    return null;
+  }
+
+  return id;
+}
+
+async function proxyToBackend(request: NextRequest, context: RouteContext) {
+  const params = await context.params;
+  const path = params.path || [];
+
+  if (path[0] !== "users") {
+    return Response.json({ error: "Not found" }, { status: 404 });
+  }
+
+  const userOrResponse = await syncCurrentUser();
+
+  if (userOrResponse instanceof Response) {
+    return userOrResponse;
+  }
+
+  const userIdFromPath = requestedUserId(path);
+
+  if (!userIdFromPath || userIdFromPath !== userOrResponse.id) {
+    return Response.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const headers = new Headers();
+  headers.set("x-bunkmax-service-secret", SERVICE_SECRET);
+
+  const contentType = request.headers.get("content-type");
+  if (contentType) {
+    headers.set("content-type", contentType);
+  }
+
+  const body =
+    request.method === "GET" || request.method === "HEAD"
+      ? undefined
+      : await request.arrayBuffer();
+
+  const backendRes = await fetch(backendUrl(path, request.nextUrl.search), {
+    method: request.method,
+    headers,
+    body,
+    cache: "no-store",
+  });
+
+  const responseHeaders = new Headers();
+
+  const responseContentType = backendRes.headers.get("content-type");
+  if (responseContentType) {
+    responseHeaders.set("content-type", responseContentType);
+  }
+
+  return new Response(backendRes.body, {
+    status: backendRes.status,
+    headers: responseHeaders,
+  });
+}
+
+export async function GET(request: NextRequest, context: RouteContext) {
+  return proxyToBackend(request, context);
+}
+
+export async function POST(request: NextRequest, context: RouteContext) {
+  return proxyToBackend(request, context);
+}
+
+export async function PUT(request: NextRequest, context: RouteContext) {
+  return proxyToBackend(request, context);
+}
+
+export async function DELETE(request: NextRequest, context: RouteContext) {
+  return proxyToBackend(request, context);
+}

@@ -1,8 +1,14 @@
-import os
 import logging
+import os
+from contextlib import suppress
+
 import psycopg2
+from dotenv import load_dotenv
+from psycopg2 import extensions
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
+
+load_dotenv()
 
 logger = logging.getLogger("database")
 
@@ -12,17 +18,29 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is missing")
 
 
+def _get_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        logger.warning("Invalid %s value. Falling back to %s.", name, default)
+        return default
+
+
+MIN_CONN = max(1, _get_int_env("DB_POOL_MIN", 1))
+MAX_CONN = max(MIN_CONN, _get_int_env("DB_POOL_MAX", 5))
+
+
 class PooledConnection:
     """
-    Wrapper around a psycopg2 pooled connection.
+    Small wrapper around a psycopg2 pooled connection.
 
-    This allows existing code like:
+    Existing code can still do:
+
         conn = get_conn()
         ...
         conn.close()
 
-    to keep working, while internally returning the connection
-    back to the pool instead of actually closing it.
+    Calling close() returns the connection to the pool instead of closing it.
     """
 
     def __init__(self, raw_conn, pool: ThreadedConnectionPool):
@@ -45,22 +63,40 @@ class PooledConnection:
         if self._returned:
             return
 
+        self._returned = True
+
+        if self._raw_conn.closed:
+            with suppress(Exception):
+                self._pool.putconn(self._raw_conn, close=True)
+            return
+
         try:
-            if not self._raw_conn.closed:
-                self._pool.putconn(self._raw_conn)
-        except Exception as e:
-            logger.exception("Failed to return connection to pool: %s", e)
-        finally:
-            self._returned = True
+            status = self._raw_conn.get_transaction_status()
+
+            if status != extensions.TRANSACTION_STATUS_IDLE:
+                self._raw_conn.rollback()
+
+            self._pool.putconn(self._raw_conn)
+
+        except Exception:
+            logger.exception("Failed to safely return DB connection to pool")
+
+            with suppress(Exception):
+                self._pool.putconn(self._raw_conn, close=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if exc_type is not None:
+            with suppress(Exception):
+                self.rollback()
+
+        self.close()
 
     def __getattr__(self, name):
         return getattr(self._raw_conn, name)
 
-
-# Keep pool small for Render/free DBs.
-# Too large can exhaust PostgreSQL plan limits.
-MIN_CONN = int(os.getenv("DB_POOL_MIN", "1"))
-MAX_CONN = int(os.getenv("DB_POOL_MAX", "5"))
 
 try:
     connection_pool = ThreadedConnectionPool(
@@ -69,39 +105,46 @@ try:
         dsn=DATABASE_URL,
         cursor_factory=RealDictCursor,
     )
-    logger.info("Database connection pool created: min=%s max=%s", MIN_CONN, MAX_CONN)
-except Exception as e:
+
+    logger.info(
+        "Database connection pool created: min=%s max=%s",
+        MIN_CONN,
+        MAX_CONN,
+    )
+
+except Exception as exc:
     logger.exception("Failed to create database connection pool")
-    raise RuntimeError(f"Failed to create database connection pool: {e}")
+    raise RuntimeError("Failed to create database connection pool") from exc
 
 
-def get_conn():
+def get_conn() -> PooledConnection:
     """
     Get a database connection from the pool.
 
-    IMPORTANT:
-    Call conn.close() when done.
-    This wrapper returns it to the pool.
+    Always call conn.close() when done.
+    The wrapper returns it to the pool.
     """
+
     try:
         raw_conn = connection_pool.getconn()
 
         if raw_conn.closed:
-            raw_conn = psycopg2.connect(
-                DATABASE_URL,
-                cursor_factory=RealDictCursor,
-            )
+            with suppress(Exception):
+                connection_pool.putconn(raw_conn, close=True)
+
+            raw_conn = connection_pool.getconn()
 
         return PooledConnection(raw_conn, connection_pool)
 
-    except Exception as e:
+    except Exception as exc:
         logger.exception("Failed to get connection from pool")
-        raise Exception(f"Database connection failed: {e}")
+        raise RuntimeError("Database connection failed") from exc
 
 
 def close_all_connections():
     try:
         connection_pool.closeall()
         logger.info("All database connections closed")
-    except Exception as e:
-        logger.exception("Failed to close database connection pool: %s", e)
+
+    except Exception:
+        logger.exception("Failed to close database connection pool")

@@ -1,24 +1,37 @@
 import { auth } from "@/auth";
 
-const API_BASE = "https://bunkmax.onrender.com";
+const API_BASE =
+  process.env.BACKEND_API_BASE ||
+  process.env.NEXT_PUBLIC_API_BASE ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "http://127.0.0.1:8000";
+
+const SERVICE_SECRET = process.env.BACKEND_API_SECRET || "";
 
 export async function GET() {
   const session = await auth();
 
-  const email = session?.user?.email || (session?.user as any)?.email;
+  const email = session?.user?.email?.trim().toLowerCase();
   const name = session?.user?.name || "Student";
 
   if (!email) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  if (!SERVICE_SECRET) {
+    return Response.json(
+      { error: "Backend service secret is missing" },
+      { status: 500 }
+    );
+  }
+
   const res = await fetch(`${API_BASE}/auth/google-user`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      email,
-      name,
-    }),
+    headers: {
+      "Content-Type": "application/json",
+      "x-bunkmax-service-secret": SERVICE_SECRET,
+    },
+    body: JSON.stringify({ email, name }),
     cache: "no-store",
   });
 

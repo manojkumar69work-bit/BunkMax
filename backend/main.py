@@ -1,33 +1,22 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, model_validator
-from typing import Any, Optional, Literal
 from datetime import datetime, timedelta
+from secrets import compare_digest
+from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo
-from database import get_conn
+import logging
 import math
 import os
-import logging
 
+from database import get_conn
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, model_validator
 
-# ---------------------------
-# LOGGING
-# ---------------------------
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bunkmax")
 
-
-# ---------------------------
-# APP
-# ---------------------------
-
 app = FastAPI(title="BunkMax API")
 
-
-# ---------------------------
-# CORS
-# ---------------------------
 
 def get_allowed_origins() -> list[str]:
     default_origins = [
@@ -65,9 +54,52 @@ app.add_middleware(
 )
 
 
-# ---------------------------
-# MODELS
-# ---------------------------
+def require_secret(
+    env_name: str,
+    provided_secret: Optional[str],
+    label: str,
+) -> None:
+    expected_secret = os.getenv(env_name, "").strip()
+
+    if not expected_secret:
+        logger.error("%s is not configured", env_name)
+        raise HTTPException(
+            status_code=500,
+            detail=f"{label} secret is not configured",
+        )
+
+    if not provided_secret or not compare_digest(provided_secret, expected_secret):
+        raise HTTPException(
+            status_code=401,
+            detail=f"Invalid {label} secret",
+        )
+
+
+def require_service_secret(
+    x_bunkmax_service_secret: Optional[str] = Header(
+        default=None,
+        alias="x-bunkmax-service-secret",
+    )
+) -> None:
+    require_secret(
+        "BACKEND_API_SECRET",
+        x_bunkmax_service_secret,
+        "service",
+    )
+
+
+def require_admin_secret(
+    x_bunkmax_admin_secret: Optional[str] = Header(
+        default=None,
+        alias="x-bunkmax-admin-secret",
+    )
+) -> None:
+    require_secret(
+        "ADMIN_API_SECRET",
+        x_bunkmax_admin_secret,
+        "admin",
+    )
+
 
 class ERPImportPayload(BaseModel):
     subjects: list[dict[str, Any]]
@@ -76,7 +108,7 @@ class ERPImportPayload(BaseModel):
 
 class MarkAttendance(BaseModel):
     subject_name: str = Field(..., min_length=1, max_length=255)
-    period_no: int = Field(..., ge=1, le=12)
+    period_no: int = Field(..., ge=1, le=6)
     status: Literal["present", "absent"]
 
 
@@ -104,7 +136,7 @@ class UserPayload(BaseModel):
 
 class ScheduleEntry(BaseModel):
     day_name: str = Field(..., min_length=1, max_length=20)
-    period_no: int = Field(..., ge=1, le=12)
+    period_no: int = Field(..., ge=1, le=6)
     subject_name: str = Field(default="", max_length=255)
 
 
@@ -129,18 +161,11 @@ class CalendarPlanPayload(BaseModel):
     days: list[CalendarPlanDay]
 
 
-# ---------------------------
-# CONSTANTS
-# ---------------------------
-
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 VALID_DAYS = set(ALL_DAYS)
+CLASS_PERIODS = 6
 
-
-# ---------------------------
-# HELPERS
-# ---------------------------
 
 def clean_text(value: Any) -> str:
     return str(value or "").strip()
@@ -213,18 +238,6 @@ def get_today_name() -> str:
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%A")
 
 
-def get_next_valid_class_day(day_map: dict[str, list[str]]) -> Optional[str]:
-    today_idx = datetime.now(ZoneInfo("Asia/Kolkata")).weekday()
-
-    for i in range(1, 8):
-        day_name = WEEKDAYS[(today_idx + i) % len(WEEKDAYS)]
-        classes = day_map.get(day_name, [])
-        if any(clean_text(c) for c in classes):
-            return day_name
-
-    return None
-
-
 def load_subjects_raw(user_id: int) -> list[dict[str, Any]]:
     conn = get_conn()
     try:
@@ -283,22 +296,57 @@ def load_timetable_rows(user_id: int) -> list[dict[str, Any]]:
         conn.close()
 
 
-def build_day_map(timetable_rows: list[dict[str, Any]]) -> dict[str, list[str]]:
-    day_map: dict[str, list[str]] = {}
+def build_day_map(
+    timetable_rows: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    day_map: dict[str, list[dict[str, Any]]] = {}
 
     for row in timetable_rows:
         day = clean_text(row.get("day_name"))
         subject_name = clean_text(row.get("subject_name"))
 
-        if day and subject_name:
-            day_map.setdefault(day, []).append(subject_name)
+        try:
+            period_no = int(row.get("period_no") or 0)
+        except Exception:
+            period_no = 0
+
+        if not day or day not in VALID_DAYS:
+            continue
+
+        if not subject_name:
+            continue
+
+        if period_no < 1 or period_no > CLASS_PERIODS:
+            continue
+
+        day_map.setdefault(day, []).append({
+            "period_no": period_no,
+            "subject_name": subject_name,
+        })
+
+    for classes in day_map.values():
+        classes.sort(key=lambda item: int(item["period_no"]))
 
     return day_map
 
 
+def get_next_valid_class_day(day_map: dict[str, list[dict[str, Any]]]) -> Optional[str]:
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+    for i in range(1, 8):
+        check_date = today + timedelta(days=i)
+        day_name = check_date.strftime("%A")
+
+        classes = day_map.get(day_name, [])
+        if any(clean_text(c.get("subject_name")) for c in classes):
+            return day_name
+
+    return None
+
+
 def simulate_absence_for_subjects(
     subjects: list[dict[str, Any]],
-    missed_subjects: list[str]
+    missed_classes: list[dict[str, Any]],
 ) -> dict[str, float]:
     simulated = [
         {
@@ -309,8 +357,8 @@ def simulate_absence_for_subjects(
         for s in subjects
     ]
 
-    for missed_subject in missed_subjects:
-        missed_clean = clean_text(missed_subject).lower()
+    for missed_class in missed_classes:
+        missed_clean = clean_text(missed_class.get("subject_name")).lower()
 
         for s in simulated:
             if clean_text(s["subject_name"]).lower() == missed_clean:
@@ -323,21 +371,6 @@ def simulate_absence_for_subjects(
     }
 
 
-def ensure_user_exists(user_id: int):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="User not found")
-    finally:
-        conn.close()
-
-
-# ---------------------------
-# ROOT
-# ---------------------------
-
 @app.get("/")
 def root():
     return {
@@ -346,12 +379,8 @@ def root():
     }
 
 
-# ---------------------------
-# INIT DB
-# ---------------------------
-
 @app.get("/init-db")
-def init_db():
+def init_db(_: None = Depends(require_admin_secret)):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -364,55 +393,366 @@ def init_db():
                     branch TEXT DEFAULT '',
                     semester TEXT DEFAULT '',
                     section TEXT DEFAULT '',
-                    default_target INTEGER DEFAULT 75
+                    default_target INTEGER DEFAULT 75,
+                    CONSTRAINT users_email_unique UNIQUE (email),
+                    CONSTRAINT users_default_target_check
+                        CHECK (default_target >= 1 AND default_target <= 100)
                 );
             """)
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS subjects (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     subject_name TEXT NOT NULL,
                     attended_classes INTEGER DEFAULT 0,
                     total_classes INTEGER DEFAULT 0,
                     required_percentage INTEGER DEFAULT 75,
-                    UNIQUE(user_id, subject_name)
+                    UNIQUE(user_id, subject_name),
+                    CONSTRAINT subjects_attended_non_negative
+                        CHECK (attended_classes >= 0),
+                    CONSTRAINT subjects_total_non_negative
+                        CHECK (total_classes >= 0),
+                    CONSTRAINT subjects_attended_lte_total
+                        CHECK (attended_classes <= total_classes),
+                    CONSTRAINT subjects_required_percentage_check
+                        CHECK (required_percentage >= 1 AND required_percentage <= 100),
+                    CONSTRAINT subjects_name_not_empty
+                        CHECK (TRIM(subject_name) != '')
                 );
             """)
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS timetable (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     day_name TEXT NOT NULL,
                     period_no INTEGER NOT NULL,
                     subject_name TEXT DEFAULT '',
-                    UNIQUE(user_id, day_name, period_no)
+                    UNIQUE(user_id, day_name, period_no),
+                    CONSTRAINT timetable_day_name_check
+                        CHECK (
+                            day_name IN (
+                                'Monday',
+                                'Tuesday',
+                                'Wednesday',
+                                'Thursday',
+                                'Friday',
+                                'Saturday',
+                                'Sunday'
+                            )
+                        ),
+                    CONSTRAINT timetable_period_no_check
+                        CHECK (period_no >= 1 AND period_no <= 6)
                 );
             """)
 
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_subjects_user_id ON subjects(user_id);")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_timetable_user_id ON timetable(user_id);")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_timetable_user_day ON timetable(user_id, day_name);")
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
+                ON users (LOWER(email));
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subjects_user_id
+                ON subjects(user_id);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_timetable_user_id
+                ON timetable(user_id);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_timetable_user_day
+                ON timetable(user_id, day_name);
+            """)
 
             conn.commit()
 
         logger.info("Database initialized successfully")
         return {"message": "Database initialized successfully."}
 
-    except Exception as e:
+    except Exception:
         logger.exception("Database initialization failed")
         raise HTTPException(status_code=500, detail="Database initialization failed")
     finally:
         conn.close()
 
 
-# ---------------------------
-# AUTH
-# ---------------------------
+@app.get("/migrate-db")
+def migrate_db(_: None = Depends(require_admin_secret)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE users
+                SET email = ''
+                WHERE email IS NULL;
+            """)
+
+            cur.execute("""
+                UPDATE users
+                SET default_target = 75
+                WHERE default_target IS NULL
+                   OR default_target < 1
+                   OR default_target > 100;
+            """)
+
+            cur.execute("""
+                DELETE FROM subjects
+                WHERE user_id NOT IN (SELECT id FROM users);
+            """)
+
+            cur.execute("""
+                DELETE FROM timetable
+                WHERE user_id NOT IN (SELECT id FROM users);
+            """)
+
+            cur.execute("""
+                DELETE FROM timetable
+                WHERE day_name NOT IN (
+                    'Monday',
+                    'Tuesday',
+                    'Wednesday',
+                    'Thursday',
+                    'Friday',
+                    'Saturday',
+                    'Sunday'
+                )
+                OR period_no < 1
+                OR period_no > 6;
+            """)
+
+            cur.execute("""
+                UPDATE subjects
+                SET subject_name = TRIM(subject_name)
+                WHERE subject_name IS NOT NULL;
+            """)
+
+            cur.execute("""
+                DELETE FROM subjects
+                WHERE subject_name IS NULL
+                   OR TRIM(subject_name) = '';
+            """)
+
+            cur.execute("""
+                UPDATE subjects
+                SET attended_classes = 0
+                WHERE attended_classes IS NULL OR attended_classes < 0;
+            """)
+
+            cur.execute("""
+                UPDATE subjects
+                SET total_classes = 0
+                WHERE total_classes IS NULL OR total_classes < 0;
+            """)
+
+            cur.execute("""
+                UPDATE subjects
+                SET attended_classes = total_classes
+                WHERE attended_classes > total_classes;
+            """)
+
+            cur.execute("""
+                UPDATE subjects
+                SET required_percentage = 75
+                WHERE required_percentage IS NULL
+                   OR required_percentage < 1
+                   OR required_percentage > 100;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'users_default_target_check'
+                    ) THEN
+                        ALTER TABLE users
+                        ADD CONSTRAINT users_default_target_check
+                        CHECK (default_target >= 1 AND default_target <= 100);
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'subjects_user_id_fkey'
+                    ) THEN
+                        ALTER TABLE subjects
+                        ADD CONSTRAINT subjects_user_id_fkey
+                        FOREIGN KEY (user_id)
+                        REFERENCES users(id)
+                        ON DELETE CASCADE;
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'subjects_attended_non_negative'
+                    ) THEN
+                        ALTER TABLE subjects
+                        ADD CONSTRAINT subjects_attended_non_negative
+                        CHECK (attended_classes >= 0);
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'subjects_total_non_negative'
+                    ) THEN
+                        ALTER TABLE subjects
+                        ADD CONSTRAINT subjects_total_non_negative
+                        CHECK (total_classes >= 0);
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'subjects_attended_lte_total'
+                    ) THEN
+                        ALTER TABLE subjects
+                        ADD CONSTRAINT subjects_attended_lte_total
+                        CHECK (attended_classes <= total_classes);
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'subjects_required_percentage_check'
+                    ) THEN
+                        ALTER TABLE subjects
+                        ADD CONSTRAINT subjects_required_percentage_check
+                        CHECK (required_percentage >= 1 AND required_percentage <= 100);
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'subjects_name_not_empty'
+                    ) THEN
+                        ALTER TABLE subjects
+                        ADD CONSTRAINT subjects_name_not_empty
+                        CHECK (TRIM(subject_name) != '');
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'timetable_user_id_fkey'
+                    ) THEN
+                        ALTER TABLE timetable
+                        ADD CONSTRAINT timetable_user_id_fkey
+                        FOREIGN KEY (user_id)
+                        REFERENCES users(id)
+                        ON DELETE CASCADE;
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'timetable_day_name_check'
+                    ) THEN
+                        ALTER TABLE timetable
+                        ADD CONSTRAINT timetable_day_name_check
+                        CHECK (
+                            day_name IN (
+                                'Monday',
+                                'Tuesday',
+                                'Wednesday',
+                                'Thursday',
+                                'Friday',
+                                'Saturday',
+                                'Sunday'
+                            )
+                        );
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'timetable_period_no_check'
+                    ) THEN
+                        ALTER TABLE timetable
+                        ADD CONSTRAINT timetable_period_no_check
+                        CHECK (period_no >= 1 AND period_no <= 6);
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower_non_empty
+                ON users (LOWER(email))
+                WHERE TRIM(email) != '';
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subjects_user_id
+                ON subjects(user_id);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_timetable_user_id
+                ON timetable(user_id);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_timetable_user_day
+                ON timetable(user_id, day_name);
+            """)
+
+            conn.commit()
+
+        logger.info("Database migration completed successfully")
+        return {"message": "Database migration completed successfully."}
+
+    except Exception:
+        logger.exception("Database migration failed")
+        raise HTTPException(status_code=500, detail="Database migration failed")
+    finally:
+        conn.close()
+
 
 @app.post("/auth/google-user")
-def auth_google_user(payload: GoogleUserPayload):
+def auth_google_user(
+    payload: GoogleUserPayload,
+    _: None = Depends(require_service_secret),
+):
     email = clean_text(payload.email).lower()
     name = clean_text(payload.name) or "Student"
 
@@ -449,24 +789,20 @@ def auth_google_user(payload: GoogleUserPayload):
             new_user = cur.fetchone()
             conn.commit()
 
-            logger.info(f"New user created: {email}")
+            logger.info("New user created: %s", email)
             return new_user
 
     except HTTPException:
         raise
     except Exception:
-        logger.exception(f"Auth failed for {email}")
+        logger.exception("Auth failed for %s", email)
         raise HTTPException(status_code=500, detail="Authentication failed")
     finally:
         conn.close()
 
 
-# ---------------------------
-# USER
-# ---------------------------
-
 @app.get("/users/{user_id}")
-def get_user(user_id: int):
+def get_user(user_id: int, _: None = Depends(require_service_secret)):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -485,14 +821,18 @@ def get_user(user_id: int):
     except HTTPException:
         raise
     except Exception:
-        logger.exception(f"Failed to get user {user_id}")
+        logger.exception("Failed to get user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to fetch user")
     finally:
         conn.close()
 
 
 @app.put("/users/{user_id}")
-def update_user(user_id: int, payload: UserPayload):
+def update_user(
+    user_id: int,
+    payload: UserPayload,
+    _: None = Depends(require_service_secret),
+):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -528,18 +868,18 @@ def update_user(user_id: int, payload: UserPayload):
     except HTTPException:
         raise
     except Exception:
-        logger.exception(f"Failed to update user {user_id}")
+        logger.exception("Failed to update user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to update user")
     finally:
         conn.close()
 
 
-# ---------------------------
-# IMPORT ATTENDANCE
-# ---------------------------
-
 @app.post("/users/{user_id}/import-attendance")
-def import_attendance(user_id: int, payload: ERPImportPayload):
+def import_attendance(
+    user_id: int,
+    payload: ERPImportPayload,
+    _: None = Depends(require_service_secret),
+):
     if not payload.subjects:
         raise HTTPException(status_code=400, detail="No subjects provided")
 
@@ -601,28 +941,28 @@ def import_attendance(user_id: int, payload: ERPImportPayload):
         }
 
     except Exception:
-        logger.exception(f"Import failed for user {user_id}")
+        logger.exception("Import failed for user %s", user_id)
         raise HTTPException(status_code=500, detail="Import failed")
     finally:
         conn.close()
 
 
-# ---------------------------
-# SUBJECTS
-# ---------------------------
-
 @app.get("/users/{user_id}/subjects")
-def get_subjects(user_id: int):
+def get_subjects(user_id: int, _: None = Depends(require_service_secret)):
     try:
         rows = load_subjects_raw(user_id)
         return [build_subject_response(r) for r in rows]
     except Exception:
-        logger.exception(f"Failed to fetch subjects for user {user_id}")
+        logger.exception("Failed to fetch subjects for user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to fetch subjects")
 
 
 @app.post("/users/{user_id}/subjects")
-def save_subject(user_id: int, payload: SubjectPayload):
+def save_subject(
+    user_id: int,
+    payload: SubjectPayload,
+    _: None = Depends(require_service_secret),
+):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -649,14 +989,18 @@ def save_subject(user_id: int, payload: SubjectPayload):
         return {"message": "Subject saved successfully."}
 
     except Exception:
-        logger.exception(f"Failed to save subject for user {user_id}")
+        logger.exception("Failed to save subject for user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to save subject")
     finally:
         conn.close()
 
 
 @app.delete("/users/{user_id}/subjects/{subject_id}")
-def delete_subject(user_id: int, subject_id: int):
+def delete_subject(
+    user_id: int,
+    subject_id: int,
+    _: None = Depends(require_service_secret),
+):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -678,18 +1022,14 @@ def delete_subject(user_id: int, subject_id: int):
     except HTTPException:
         raise
     except Exception:
-        logger.exception(f"Failed to delete subject {subject_id}")
+        logger.exception("Failed to delete subject %s", subject_id)
         raise HTTPException(status_code=500, detail="Failed to delete subject")
     finally:
         conn.close()
 
 
-# ---------------------------
-# CLEAR DATA
-# ---------------------------
-
 @app.delete("/users/{user_id}/clear-data")
-def clear_user_data(user_id: int):
+def clear_user_data(user_id: int, _: None = Depends(require_service_secret)):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -700,15 +1040,11 @@ def clear_user_data(user_id: int):
         return {"message": "All subjects and timetable data cleared successfully."}
 
     except Exception:
-        logger.exception(f"Failed to clear data for user {user_id}")
+        logger.exception("Failed to clear data for user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to clear data")
     finally:
         conn.close()
 
-
-# ---------------------------
-# DASHBOARD / HOME
-# ---------------------------
 
 def build_dashboard_payload(user_id: int):
     subjects = load_subjects_minimal(user_id)
@@ -732,12 +1068,12 @@ def build_dashboard_payload(user_id: int):
         "total_absent": total_absent,
         "today_classes": [
             {
-                "period_no": i + 1,
-                "subject_name": subj,
+                "period_no": int(item["period_no"]),
+                "subject_name": item["subject_name"],
                 "marked_status": None,
             }
-            for i, subj in enumerate(today_classes)
-            if clean_text(subj)
+            for item in today_classes
+            if clean_text(item.get("subject_name"))
         ],
     }
 
@@ -745,17 +1081,17 @@ def build_dashboard_payload(user_id: int):
 
 
 @app.get("/users/{user_id}/dashboard")
-def get_dashboard(user_id: int):
+def get_dashboard(user_id: int, _: None = Depends(require_service_secret)):
     try:
         dashboard, _ = build_dashboard_payload(user_id)
         return dashboard
     except Exception:
-        logger.exception(f"Failed to load dashboard for user {user_id}")
+        logger.exception("Failed to load dashboard for user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to load dashboard")
 
 
 @app.get("/users/{user_id}/home-data")
-def get_home_data(user_id: int):
+def get_home_data(user_id: int, _: None = Depends(require_service_secret)):
     try:
         dashboard, subjects = build_dashboard_payload(user_id)
 
@@ -772,16 +1108,16 @@ def get_home_data(user_id: int):
         }
 
     except Exception:
-        logger.exception(f"Failed to load home data for user {user_id}")
+        logger.exception("Failed to load home data for user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to load home data")
 
 
-# ---------------------------
-# MARK ATTENDANCE
-# ---------------------------
-
 @app.post("/users/{user_id}/mark-attendance")
-def mark_attendance(user_id: int, payload: MarkAttendance):
+def mark_attendance(
+    user_id: int,
+    payload: MarkAttendance,
+    _: None = Depends(require_service_secret),
+):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -823,12 +1159,8 @@ def mark_attendance(user_id: int, payload: MarkAttendance):
         conn.close()
 
 
-# ---------------------------
-# SCHEDULE
-# ---------------------------
-
 @app.get("/users/{user_id}/schedule")
-def get_schedule(user_id: int):
+def get_schedule(user_id: int, _: None = Depends(require_service_secret)):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -852,14 +1184,18 @@ def get_schedule(user_id: int):
             return cur.fetchall()
 
     except Exception:
-        logger.exception(f"Failed to fetch schedule for user {user_id}")
+        logger.exception("Failed to fetch schedule for user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to fetch schedule")
     finally:
         conn.close()
 
 
 @app.post("/users/{user_id}/schedule")
-def save_schedule(user_id: int, payload: list[ScheduleEntry]):
+def save_schedule(
+    user_id: int,
+    payload: list[ScheduleEntry],
+    _: None = Depends(require_service_secret),
+):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -887,18 +1223,14 @@ def save_schedule(user_id: int, payload: list[ScheduleEntry]):
         return {"message": "Schedule saved successfully."}
 
     except Exception:
-        logger.exception(f"Failed to save schedule for user {user_id}")
+        logger.exception("Failed to save schedule for user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to save schedule")
     finally:
         conn.close()
 
 
-# ---------------------------
-# QUICK ACTIONS
-# ---------------------------
-
 @app.get("/users/{user_id}/tomorrow")
-def get_tomorrow(user_id: int):
+def get_tomorrow(user_id: int, _: None = Depends(require_service_secret)):
     subjects = load_subjects_minimal(user_id)
     timetable_rows = load_timetable_rows(user_id)
     day_map = build_day_map(timetable_rows)
@@ -917,8 +1249,8 @@ def get_tomorrow(user_id: int):
             "drop_avg": 0.0,
         }
 
-    missed_subjects = day_map.get(next_day_name, [])
-    simulated = simulate_absence_for_subjects(subjects, missed_subjects)
+    missed_classes = day_map.get(next_day_name, [])
+    simulated = simulate_absence_for_subjects(subjects, missed_classes)
 
     return {
         "title": f"Next Class Day ({next_day_name})",
@@ -930,12 +1262,12 @@ def get_tomorrow(user_id: int):
 
 
 @app.get("/users/{user_id}/best-day")
-def get_best_day(user_id: int):
+def get_best_day(user_id: int, _: None = Depends(require_service_secret)):
     return _day_logic(user_id, best=True)
 
 
 @app.get("/users/{user_id}/worst-day")
-def get_worst_day(user_id: int):
+def get_worst_day(user_id: int, _: None = Depends(require_service_secret)):
     return _day_logic(user_id, best=False)
 
 
@@ -959,12 +1291,12 @@ def _day_logic(user_id: int, best: bool):
     results = []
 
     for day in WEEKDAYS:
-        missed_subjects = day_map.get(day, [])
+        missed_classes = day_map.get(day, [])
 
-        if not missed_subjects:
+        if not missed_classes:
             continue
 
-        simulated = simulate_absence_for_subjects(subjects, missed_subjects)
+        simulated = simulate_absence_for_subjects(subjects, missed_classes)
 
         results.append({
             "day": day,
@@ -989,7 +1321,7 @@ def _day_logic(user_id: int, best: bool):
             key=lambda r: (
                 round(r["drop_overall"], 6),
                 round(r["drop_avg"], 6),
-                r["day"],
+                WEEKDAYS.index(r["day"]),
             ),
         )
         title = f"Best Day: {chosen['day']}"
@@ -999,7 +1331,7 @@ def _day_logic(user_id: int, best: bool):
             key=lambda r: (
                 round(r["drop_overall"], 6),
                 round(r["drop_avg"], 6),
-                r["day"],
+                -WEEKDAYS.index(r["day"]),
             ),
         )
         title = f"Worst Day: {chosen['day']}"
@@ -1013,12 +1345,12 @@ def _day_logic(user_id: int, best: bool):
     }
 
 
-# ---------------------------
-# PLAN BUNKS
-# ---------------------------
-
 @app.post("/users/{user_id}/plan-bunks")
-def plan_bunks(user_id: int, payload: PlanPayload):
+def plan_bunks(
+    user_id: int,
+    payload: PlanPayload,
+    _: None = Depends(require_service_secret),
+):
     subjects = load_subjects_minimal(user_id)
     timetable_rows = load_timetable_rows(user_id)
     day_map = build_day_map(timetable_rows)
@@ -1026,15 +1358,16 @@ def plan_bunks(user_id: int, payload: PlanPayload):
     current_overall = calc_overall(subjects)
     current_avg = calc_avg(subjects)
 
-    missed_subjects: list[str] = []
+    missed_classes: list[dict[str, Any]] = []
     label = ""
 
-    today_idx = datetime.now(ZoneInfo("Asia/Kolkata")).weekday()
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
     if payload.mode == "tomorrow":
         next_day_name = get_next_valid_class_day(day_map)
+
         if next_day_name:
-            missed_subjects = day_map.get(next_day_name, [])
+            missed_classes = day_map.get(next_day_name, [])
             label = f"Absent on {next_day_name}"
         else:
             label = "No upcoming classes"
@@ -1042,16 +1375,18 @@ def plan_bunks(user_id: int, payload: PlanPayload):
     elif payload.mode == "next_n_days":
         n_days = payload.n_days or 1
         count = 0
-        i = 1
 
-        while count < n_days and i <= 365:
-            day_name = WEEKDAYS[(today_idx + i) % len(WEEKDAYS)]
+        for i in range(1, 366):
+            if count >= n_days:
+                break
 
-            if day_name in day_map and any(clean_text(c) for c in day_map[day_name]):
-                missed_subjects.extend(day_map[day_name])
+            check_date = today + timedelta(days=i)
+            day_name = check_date.strftime("%A")
+            classes = day_map.get(day_name, [])
+
+            if any(clean_text(c.get("subject_name")) for c in classes):
+                missed_classes.extend(classes)
                 count += 1
-
-            i += 1
 
         label = f"Absent for next {count} class days"
 
@@ -1059,14 +1394,18 @@ def plan_bunks(user_id: int, payload: PlanPayload):
         selected_days = payload.selected_days or []
         weeks = payload.weeks or 1
 
+        valid_selected_days = [
+            day for day in selected_days
+            if day in WEEKDAYS
+        ]
+
         for _ in range(weeks):
-            for day_name in selected_days:
-                if day_name in WEEKDAYS:
-                    missed_subjects.extend(day_map.get(day_name, []))
+            for day_name in valid_selected_days:
+                missed_classes.extend(day_map.get(day_name, []))
 
         label = "Absent on selected weekdays"
 
-    simulated = simulate_absence_for_subjects(subjects, missed_subjects)
+    simulated = simulate_absence_for_subjects(subjects, missed_classes)
 
     return {
         "scenario_label": label,
@@ -1077,12 +1416,12 @@ def plan_bunks(user_id: int, payload: PlanPayload):
     }
 
 
-# ---------------------------
-# CALENDAR PLAN
-# ---------------------------
-
 @app.post("/users/{user_id}/calendar-plan")
-def calendar_plan(user_id: int, payload: CalendarPlanPayload):
+def calendar_plan(
+    user_id: int,
+    payload: CalendarPlanPayload,
+    _: None = Depends(require_service_secret),
+):
     if not payload.days:
         raise HTTPException(status_code=400, detail="At least one date is required")
 
@@ -1111,11 +1450,10 @@ def calendar_plan(user_id: int, payload: CalendarPlanPayload):
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid date format: {day_plan.date}"
+                detail=f"Invalid date format: {day_plan.date}",
             )
 
-        weekday_num = date_obj.weekday()
-        weekday_name = ALL_DAYS[weekday_num]
+        weekday_name = date_obj.strftime("%A")
 
         if weekday_name == "Sunday":
             skipped_dates.append({
@@ -1126,15 +1464,17 @@ def calendar_plan(user_id: int, payload: CalendarPlanPayload):
 
         classes_today = day_map.get(weekday_name, [])
 
-        if not classes_today or all(not clean_text(c) for c in classes_today):
+        if not classes_today or all(
+            not clean_text(c.get("subject_name")) for c in classes_today
+        ):
             skipped_dates.append({
                 "date": day_plan.date,
                 "reason": "No classes scheduled",
             })
             continue
 
-        for class_name in classes_today:
-            clean_class = clean_text(class_name)
+        for class_item in classes_today:
+            clean_class = clean_text(class_item.get("subject_name"))
 
             if not clean_class:
                 continue
