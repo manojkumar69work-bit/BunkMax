@@ -56,7 +56,7 @@ export default function AboutPage() {
 
       {/* FOOTER */}
       <div className="text-center text-xs text-gray-500 pt-2">
-        Built with ❤️ for students from spidy
+        Built for students from spidy
       </div>
     </div>
   );

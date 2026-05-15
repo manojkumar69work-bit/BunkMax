@@ -190,14 +190,14 @@ export default function PlanPage() {
 
   if (!appUser) {
     return (
-      <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
-        <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
+      <div className="auth-shell">
+        <div className="auth-card">
           <h1 className="text-2xl font-bold">BunkMax</h1>
           <p className="text-sm text-gray-300">Please login to continue.</p>
 
           <a
             href="/login"
-            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
+            className="primary-btn inline-flex items-center justify-center px-4"
           >
             Go to Login
           </a>
@@ -545,7 +545,7 @@ function DateSelectionModal({
         <button
           type="button"
           onClick={onPresent}
-          className="w-full px-4 py-3 rounded-2xl border border-green-500/30 bg-green-500/20 text-green-200 font-semibold hover:bg-green-500/30 transition"
+          className="w-full px-4 py-3 rounded-lg border border-green-500/30 bg-green-500/20 text-green-200 font-semibold hover:bg-green-500/30 transition"
         >
           Mark Present ✓
         </button>
@@ -553,7 +553,7 @@ function DateSelectionModal({
         <button
           type="button"
           onClick={onAbsent}
-          className="w-full px-4 py-3 rounded-2xl border border-red-500/30 bg-red-500/20 text-red-200 font-semibold hover:bg-red-500/30 transition"
+          className="w-full px-4 py-3 rounded-lg border border-red-500/30 bg-red-500/20 text-red-200 font-semibold hover:bg-red-500/30 transition"
         >
           Mark Absent ✗
         </button>

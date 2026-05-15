@@ -101,6 +101,24 @@ def require_admin_secret(
     )
 
 
+def require_admin_db_routes_enabled(
+    x_bunkmax_admin_secret: Optional[str] = Header(
+        default=None,
+        alias="x-bunkmax-admin-secret",
+    )
+) -> None:
+    enabled = os.getenv("ENABLE_ADMIN_DB_ROUTES", "").strip().lower()
+
+    if enabled not in {"1", "true", "yes", "on"}:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    require_secret(
+        "ADMIN_API_SECRET",
+        x_bunkmax_admin_secret,
+        "admin",
+    )
+
+
 class ERPImportPayload(BaseModel):
     subjects: list[dict[str, Any]]
     attendance: dict[str, Any]
@@ -380,7 +398,7 @@ def root():
 
 
 @app.get("/init-db")
-def init_db(_: None = Depends(require_admin_secret)):
+def init_db(_: None = Depends(require_admin_db_routes_enabled)):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -480,7 +498,7 @@ def init_db(_: None = Depends(require_admin_secret)):
 
 
 @app.get("/migrate-db")
-def migrate_db(_: None = Depends(require_admin_secret)):
+def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
     conn = get_conn()
     try:
         with conn.cursor() as cur:

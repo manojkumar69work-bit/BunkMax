@@ -1,5 +1,6 @@
 import { signIn, auth } from "@/auth";
 import { redirect } from "next/navigation";
+import { GraduationCap } from "lucide-react";
 
 export default async function LoginPage() {
   const session = await auth();
@@ -9,8 +10,12 @@ export default async function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#070a10] px-4">
-      <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6 text-center">
+    <div className="auth-shell">
+      <div className="auth-card">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[#1d9bf0]/30 bg-[#1d9bf0]/12 text-[#8ecdf8]">
+          <GraduationCap size={28} aria-hidden="true" />
+        </div>
+
         <div>
           <h1 className="text-3xl font-bold tracking-tight">BunkMax</h1>
           <p className="text-sm text-gray-400 mt-2">
@@ -26,13 +31,14 @@ export default async function LoginPage() {
         >
           <button
             type="submit"
-            className="w-full flex items-center justify-center gap-3 rounded-2xl bg-white text-black py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
+            className="primary-btn flex items-center justify-center gap-3"
           >
-            <img
-              src="https://www.svgrepo.com/show/475656/google-color.svg"
-              alt="Google"
-              className="h-5 w-5"
-            />
+            <span
+              aria-hidden="true"
+              className="flex h-5 w-5 items-center justify-center rounded-full border border-black/10 bg-white text-sm font-bold text-[#4285f4]"
+            >
+              G
+            </span>
             Continue with Google
           </button>
         </form>

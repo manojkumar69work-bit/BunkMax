@@ -9,9 +9,10 @@ import {
   getTomorrow,
   getBestDay,
   getWorstDay,
+  type ScheduleEntry,
 } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
-import { Info } from "lucide-react";
+import { Info, Upload } from "lucide-react";
 import { useAppUser } from "@/lib/user";
 
 type DashboardData = {
@@ -88,7 +89,7 @@ export default function Home() {
         const scheduleData = await getSchedule(userId);
         const grouped: Record<string, string[]> = {};
 
-        scheduleData.forEach((item: any) => {
+        scheduleData.forEach((item: ScheduleEntry) => {
           if (!item?.day_name) return;
 
           if (!grouped[item.day_name]) {
@@ -215,14 +216,14 @@ export default function Home() {
 
   if (!appUser) {
     return (
-      <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
-        <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
+      <div className="auth-shell">
+        <div className="auth-card">
           <h1 className="text-2xl font-bold">BunkMax</h1>
           <p className="text-sm text-gray-300">Please login to continue.</p>
 
           <a
             href="/login"
-            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
+            className="primary-btn inline-flex items-center justify-center px-4"
           >
             Go to Login
           </a>
@@ -247,9 +248,10 @@ export default function Home() {
 
         <Link
           href="/about"
-          className="h-10 w-10 flex items-center justify-center rounded-full border border-white/10 bg-white/5 text-gray-300 hover:text-white hover:bg-white/10 transition backdrop-blur-md"
+          className="icon-button"
+          aria-label="About BunkMax"
         >
-          <Info size={18} />
+          <Info size={18} aria-hidden="true" />
         </Link>
       </div>
 
@@ -271,7 +273,7 @@ export default function Home() {
 
           <div className="glass-card p-4">
             <div className="flex items-center justify-between gap-3">
-              <div>
+              <div className="min-w-0">
                 <p className="font-semibold">Import from ERP</p>
                 <p className="text-xs text-gray-400 mt-1">
                   Import subjects and attendance into BunkMax
@@ -280,8 +282,9 @@ export default function Home() {
 
               <Link
                 href="/import"
-                className="inline-flex min-w-[96px] items-center justify-center rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md"
+                className="inline-flex min-w-[96px] items-center justify-center gap-2 rounded-full border border-[#1d9bf0]/25 bg-[#1d9bf0]/12 px-3 py-2 text-sm font-bold text-[#8ecdf8]"
               >
+                <Upload size={15} aria-hidden="true" />
                 Open
               </Link>
             </div>
@@ -412,12 +415,12 @@ function DonutChart({ percentage }: { percentage: number }) {
         className="absolute inset-0 rounded-full"
         style={{
           background: `conic-gradient(
-            #3b82f6 0% ${value}%,
+            #1d9bf0 0% ${value}%,
             rgba(255,255,255,0.14) ${value}% 100%
           )`,
         }}
       />
-      <div className="absolute inset-[14px] rounded-full bg-[#0f172a]" />
+      <div className="absolute inset-[14px] rounded-full bg-[#101312]" />
       <div className="absolute inset-[18px] rounded-full border border-white/10 flex flex-col items-center justify-center text-center">
         <p className="text-[11px] text-gray-400">Overall</p>
         <p className="text-2xl font-bold mt-1">{formatPercent(value)}</p>

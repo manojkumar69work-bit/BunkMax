@@ -1,11 +1,22 @@
 @import "tailwindcss";
 
+:root {
+  --app-bg: #000000;
+  --surface: rgba(22, 24, 28, 0.96);
+  --surface-strong: rgba(32, 35, 39, 0.96);
+  --surface-soft: rgba(15, 20, 25, 0.92);
+  --line: #2f3336;
+  --line-strong: #536471;
+  --text-muted: #71767b;
+  --accent: #1d9bf0;
+  --accent-2: #ffd400;
+}
+
 html,
 body {
   background:
-    radial-gradient(circle at top, rgba(59, 130, 246, 0.16), transparent 28%),
-    radial-gradient(circle at bottom right, rgba(168, 85, 247, 0.1), transparent 22%),
-    #070a10;
+    radial-gradient(circle at top, rgba(29, 155, 240, 0.14), transparent 260px),
+    #000000;
   color: white;
   min-height: 100%;
   -webkit-tap-highlight-color: transparent;
@@ -14,6 +25,7 @@ body {
 body {
   min-height: 100vh;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
 }
 
 * {
@@ -36,6 +48,15 @@ button {
   transition: all 0.2s ease;
 }
 
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid rgba(29, 155, 240, 0.72);
+  outline-offset: 2px;
+}
+
 button:active {
   transform: scale(0.985);
 }
@@ -50,19 +71,20 @@ button:active {
 }
 
 .app-shell {
-  @apply p-4 pb-24 space-y-5;
+  @apply p-4 pb-28 space-y-5;
 }
 
 .glass-card {
   position: relative;
+  overflow: hidden;
   border-radius: 1rem;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   box-shadow:
-    0 10px 30px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    0 16px 42px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .glass-card::before {
@@ -73,20 +95,21 @@ button:active {
   pointer-events: none;
   background: linear-gradient(
     135deg,
-    rgba(255, 255, 255, 0.12),
-    rgba(255, 255, 255, 0.02) 35%,
-    rgba(255, 255, 255, 0.01) 100%
+    rgba(255, 255, 255, 0.055),
+    rgba(255, 255, 255, 0.01) 45%,
+    rgba(29, 155, 240, 0.06) 100%
   );
 }
 
 .soft-card {
   position: relative;
+  overflow: hidden;
   border-radius: 1rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--line);
   background: linear-gradient(
     135deg,
-    rgba(255, 255, 255, 0.08),
-    rgba(255, 255, 255, 0.03)
+    rgba(22, 24, 28, 0.98),
+    rgba(15, 20, 25, 0.96)
   );
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -96,51 +119,74 @@ button:active {
 }
 
 .section-title {
-  @apply text-sm font-semibold tracking-wide text-gray-200;
+  @apply text-xs font-semibold uppercase text-gray-400;
+  letter-spacing: 0.08em;
 }
 
 .input-ui {
-  @apply w-full rounded-xl px-3 py-3 outline-none text-white placeholder:text-gray-400;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  @apply w-full rounded-xl px-3 py-3 outline-none text-white placeholder:text-gray-500;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.52);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .input-ui:focus {
-  border-color: rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(29, 155, 240, 0.7);
+  background: rgba(0, 0, 0, 0.68);
 }
 
 .primary-btn {
-  @apply w-full rounded-xl py-3 font-semibold text-black;
-  background: linear-gradient(180deg, #ffffff 0%, #ececec 100%);
+  @apply w-full rounded-full py-3 font-bold text-white;
+  background: #1d9bf0;
   box-shadow:
-    0 8px 24px rgba(255, 255, 255, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+    0 10px 28px rgba(29, 155, 240, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
 .primary-btn:hover {
-  filter: brightness(1.02);
+  background: #1a8cd8;
 }
 
 .secondary-btn {
-  @apply w-full rounded-xl py-3 font-medium text-white;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  @apply w-full rounded-full py-3 font-bold text-white;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
 }
 
 .secondary-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--surface-strong);
 }
 
 .metric-title {
-  @apply text-xs text-gray-400;
+  @apply text-xs font-medium uppercase text-gray-400;
+  letter-spacing: 0.06em;
 }
 
 .metric-value {
   @apply mt-1 text-2xl font-bold;
+}
+
+.auth-shell {
+  @apply min-h-screen flex items-center justify-center px-4;
+}
+
+.auth-card {
+  @apply w-full max-w-[380px] space-y-6 border p-7 text-center;
+  border-color: var(--line);
+  border-radius: 1rem;
+  background: rgba(22, 24, 28, 0.96);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.icon-button {
+  @apply flex h-10 w-10 items-center justify-center rounded-full text-gray-300 transition;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.icon-button:hover {
+  color: white;
+  background: var(--surface-strong);
 }

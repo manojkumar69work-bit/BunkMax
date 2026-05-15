@@ -35,7 +35,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
     async session({ session, token }) {
       if (session.user) {
-        (session.user as any).email = token.email;
+        session.user.email =
+          typeof token.email === "string" ? token.email : session.user.email;
         session.user.name = (token.name as string) || session.user.name;
       }
       return session;

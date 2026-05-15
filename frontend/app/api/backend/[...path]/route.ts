@@ -3,8 +3,6 @@ import { NextRequest } from "next/server";
 
 const API_BASE =
   process.env.BACKEND_API_BASE ||
-  process.env.NEXT_PUBLIC_API_BASE ||
-  process.env.NEXT_PUBLIC_API_URL ||
   "http://127.0.0.1:8000";
 
 const SERVICE_SECRET = process.env.BACKEND_API_SECRET || "";
@@ -49,18 +47,27 @@ async function syncCurrentUser(): Promise<AppUser | Response> {
     );
   }
 
-  const res = await fetch(`${API_BASE}/auth/google-user`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-bunkmax-service-secret": SERVICE_SECRET,
-    },
-    body: JSON.stringify({
-      email,
-      name,
-    }),
-    cache: "no-store",
-  });
+  let res: Response;
+
+  try {
+    res = await fetch(`${API_BASE}/auth/google-user`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-bunkmax-service-secret": SERVICE_SECRET,
+      },
+      body: JSON.stringify({
+        email,
+        name,
+      }),
+      cache: "no-store",
+    });
+  } catch {
+    return Response.json(
+      { error: "Backend is unreachable. Please try again shortly." },
+      { status: 502 }
+    );
+  }
 
   if (!res.ok) {
     const text = await res.text();
@@ -118,12 +125,21 @@ async function proxyToBackend(request: NextRequest, context: RouteContext) {
       ? undefined
       : await request.arrayBuffer();
 
-  const backendRes = await fetch(backendUrl(path, request.nextUrl.search), {
-    method: request.method,
-    headers,
-    body,
-    cache: "no-store",
-  });
+  let backendRes: Response;
+
+  try {
+    backendRes = await fetch(backendUrl(path, request.nextUrl.search), {
+      method: request.method,
+      headers,
+      body,
+      cache: "no-store",
+    });
+  } catch {
+    return Response.json(
+      { error: "Backend is unreachable. Please try again shortly." },
+      { status: 502 }
+    );
+  }
 
   const responseHeaders = new Headers();
 

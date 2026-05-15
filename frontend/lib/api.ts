@@ -1,8 +1,105 @@
 export const API_BASE = "/api/backend";
 
+type JsonRecord = Record<string, unknown>;
+
+export type AppUserResponse = {
+  id: number;
+  name: string;
+  email?: string;
+  college: string;
+  branch: string;
+  semester: string;
+  section: string;
+  default_target: number;
+};
+
+export type DashboardResponse = {
+  current_avg: number;
+  overall_percentage: number;
+  total_present: number;
+  total_absent: number;
+  today_classes: {
+    period_no: number;
+    subject_name: string;
+    marked_status?: "present" | "absent" | null;
+  }[];
+};
+
+export type HomeSubject = {
+  subject_name: string;
+  attended_classes: number;
+  total_classes: number;
+};
+
+export type HomeDataResponse = {
+  dashboard: DashboardResponse;
+  subjects: HomeSubject[];
+};
+
+export type QuickResultResponse = {
+  title: string;
+  new_overall: number;
+  drop_overall: number;
+  new_avg: number;
+  drop_avg: number;
+};
+
+export type ImportSubject = {
+  subjectid: string;
+  subject_name: string;
+};
+
+export type ImportAttendanceStats = {
+  totalsessions: number;
+  presentSessionsCount: number;
+  percentage?: string | number;
+};
+
+export type SubjectResponse = {
+  id: number;
+  subject_name: string;
+  attended_classes: number;
+  total_classes: number;
+  required_percentage?: number;
+  attendance_percentage?: number;
+  safe_bunks?: number;
+  need_to_recover?: number;
+  status?: string;
+};
+
+export type ScheduleEntry = {
+  day_name: string;
+  period_no: number;
+  subject_name: string;
+};
+
+function isRecord(value: unknown): value is JsonRecord {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function stringFromUnknown(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value;
+  if (Array.isArray(value)) return JSON.stringify(value);
+  if (isRecord(value)) return JSON.stringify(value);
+  return null;
+}
+
+function isScheduleEntry(value: unknown): value is ScheduleEntry {
+  if (!isRecord(value)) return false;
+
+  return (
+    typeof value.day_name === "string" &&
+    typeof value.subject_name === "string" &&
+    Number.isFinite(Number(value.period_no))
+  );
+}
 
 // Request deduplication cache
-const pendingRequests = new Map<string, Promise<any>>();
+const pendingRequests = new Map<string, Promise<unknown>>();
 
 // Request timeout wrapper
 async function fetchWithTimeout(
@@ -18,8 +115,8 @@ async function fetchWithTimeout(
       ...options,
       signal: controller.signal,
     });
-  } catch (error: any) {
-    if (error.name === "AbortError") {
+  } catch (error: unknown) {
+    if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error("Request timeout - server took too long to respond");
     }
     throw error;
@@ -34,18 +131,19 @@ async function fetchWithRetry(
   options: RequestInit = {},
   maxRetries: number = 2
 ): Promise<Response> {
-  let lastError: any;
+  let lastError: unknown = new Error("Request failed");
 
   for (let i = 0; i <= maxRetries; i++) {
     try {
       return await fetchWithTimeout(url, options);
-    } catch (error: any) {
+    } catch (error: unknown) {
       lastError = error;
+      const message = errorMessage(error);
 
       // Don't retry on client errors (4xx) or timeout errors
       if (
-        error.message?.includes("timeout") ||
-        error.message?.includes("4")
+        message.includes("timeout") ||
+        message.includes("4")
       ) {
         throw error;
       }
@@ -58,12 +156,12 @@ async function fetchWithRetry(
     }
   }
 
-  throw lastError;
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 // Response handler with better error messages
 async function handleResponse<T>(res: Response): Promise<T> {
-  let data: any = null;
+  let data: unknown = null;
 
   try {
     data = await res.json();
@@ -77,13 +175,22 @@ async function handleResponse<T>(res: Response): Promise<T> {
   }
 
   if (!res.ok) {
+    const detail = isRecord(data) ? data.detail : undefined;
+    const messageValue = isRecord(data) ? data.message : undefined;
+    const errorValue = isRecord(data) ? data.error : undefined;
+    const detailsValue = isRecord(data) ? data.details : undefined;
+
     const message =
-      typeof data?.detail === "string"
-        ? data.detail
-        : typeof data?.message === "string"
-        ? data.message
-        : Array.isArray(data?.detail)
-        ? JSON.stringify(data.detail)
+      typeof detail === "string"
+        ? detail
+        : typeof messageValue === "string"
+        ? messageValue
+        : typeof errorValue === "string"
+        ? errorValue
+        : typeof detailsValue === "string"
+        ? detailsValue
+        : Array.isArray(detail)
+        ? JSON.stringify(detail)
         : res.status === 404
         ? "Resource not found"
         : res.status === 403
@@ -91,13 +198,13 @@ async function handleResponse<T>(res: Response): Promise<T> {
         : res.status === 400
         ? "Invalid request"
         : res.status >= 500
-        ? "Server error - please try again later"
-        : JSON.stringify(data?.detail || data?.message || data);
+        ? stringFromUnknown(data) || "Server error - please try again later"
+        : JSON.stringify(detail || messageValue || errorValue || detailsValue || data);
 
     throw new Error(message || "Something went wrong");
   }
 
-  return data;
+  return data as T;
 }
 
 // Deduplication wrapper - prevents duplicate requests
@@ -105,8 +212,10 @@ async function fetchDeduped<T>(
   key: string,
   fetcher: () => Promise<T>
 ): Promise<T> {
-  if (pendingRequests.has(key)) {
-    return pendingRequests.get(key)!;
+  const pending = pendingRequests.get(key);
+
+  if (pending) {
+    return pending as Promise<T>;
   }
 
   const promise = fetcher().finally(() => {
@@ -121,16 +230,7 @@ async function fetchDeduped<T>(
 
 export async function getUser(userId: number) {
   const res = await fetchWithRetry(`${API_BASE}/users/${userId}`);
-  return handleResponse<{
-    id: number;
-    name: string;
-    email?: string;
-    college: string;
-    branch: string;
-    semester: string;
-    section: string;
-    default_target: number;
-  }>(res);
+  return handleResponse<AppUserResponse>(res);
 }
 
 export async function updateUser(
@@ -166,75 +266,30 @@ export async function clearAllUserData(userId: number) {
 export async function getDashboard(userId: number) {
   return fetchDeduped(`dashboard-${userId}`, async () => {
     const res = await fetchWithRetry(`${API_BASE}/users/${userId}/dashboard`);
-    return handleResponse<{
-      current_avg: number;
-      overall_percentage: number;
-      total_present: number;
-      total_absent: number;
-      today_classes: {
-        period_no: number;
-        subject_name: string;
-        marked_status?: "present" | "absent" | null;
-      }[];
-    }>(res);
+    return handleResponse<DashboardResponse>(res);
   });
 }
 
 export async function getHomeData(userId: number) {
   return fetchDeduped(`home-data-${userId}`, async () => {
     const res = await fetchWithRetry(`${API_BASE}/users/${userId}/home-data`);
-    return handleResponse<{
-      dashboard: {
-        current_avg: number;
-        overall_percentage: number;
-        total_present: number;
-        total_absent: number;
-        today_classes: {
-          period_no: number;
-          subject_name: string;
-          marked_status?: "present" | "absent" | null;
-        }[];
-      };
-      subjects: {
-        subject_name: string;
-        attended_classes: number;
-        total_classes: number;
-      }[];
-    }>(res);
+    return handleResponse<HomeDataResponse>(res);
   });
 }
 
 export async function getTomorrow(userId: number) {
   const res = await fetchWithRetry(`${API_BASE}/users/${userId}/tomorrow`);
-  return handleResponse<{
-    title: string;
-    new_overall: number;
-    drop_overall: number;
-    new_avg: number;
-    drop_avg: number;
-  }>(res);
+  return handleResponse<QuickResultResponse>(res);
 }
 
 export async function getBestDay(userId: number) {
   const res = await fetchWithRetry(`${API_BASE}/users/${userId}/best-day`);
-  return handleResponse<{
-    title: string;
-    new_overall: number;
-    drop_overall: number;
-    new_avg: number;
-    drop_avg: number;
-  }>(res);
+  return handleResponse<QuickResultResponse>(res);
 }
 
 export async function getWorstDay(userId: number) {
   const res = await fetchWithRetry(`${API_BASE}/users/${userId}/worst-day`);
-  return handleResponse<{
-    title: string;
-    new_overall: number;
-    drop_overall: number;
-    new_avg: number;
-    drop_avg: number;
-  }>(res);
+  return handleResponse<QuickResultResponse>(res);
 }
 
 export async function markAttendance(
@@ -258,8 +313,8 @@ export async function markAttendance(
 
 export async function importAttendance(
   payload: {
-    subjects: any[];
-    attendance: Record<string, any>;
+    subjects: ImportSubject[];
+    attendance: Record<string, ImportAttendanceStats>;
   },
   userId: number
 ) {
@@ -280,10 +335,12 @@ export async function importAttendance(
 export async function getSubjects(userId: number) {
   return fetchDeduped(`subjects-${userId}`, async () => {
     const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subjects`);
-    const data = await handleResponse<any>(res);
+    const data = await handleResponse<unknown>(res);
 
-    if (Array.isArray(data)) return data;
-    if (Array.isArray(data?.subjects)) return data.subjects;
+    if (Array.isArray(data)) return data as SubjectResponse[];
+    if (isRecord(data) && Array.isArray(data.subjects)) {
+      return data.subjects as SubjectResponse[];
+    }
     return [];
   });
 }
@@ -325,23 +382,29 @@ export async function deleteSubject(subjectId: number, userId: number) {
 
 /* ---------------- SCHEDULE / TIMETABLE ---------------- */
 
-function normalizeScheduleResponse(data: any) {
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.schedule)) return data.schedule;
-  if (Array.isArray(data?.timetable)) return data.timetable;
-  if (data && typeof data === "object") return data;
+function normalizeScheduleResponse(data: unknown): ScheduleEntry[] {
+  if (Array.isArray(data)) return data.filter(isScheduleEntry);
+
+  if (isRecord(data) && Array.isArray(data.schedule)) {
+    return data.schedule.filter(isScheduleEntry);
+  }
+
+  if (isRecord(data) && Array.isArray(data.timetable)) {
+    return data.timetable.filter(isScheduleEntry);
+  }
+
   return [];
 }
 
 export async function getSchedule(userId: number) {
   return fetchDeduped(`schedule-${userId}`, async () => {
     const res = await fetchWithRetry(`${API_BASE}/users/${userId}/schedule`);
-    const data = await handleResponse<any>(res);
+    const data = await handleResponse<unknown>(res);
     return normalizeScheduleResponse(data);
   });
 }
 
-export async function saveSchedule(payload: any, userId: number) {
+export async function saveSchedule(payload: ScheduleEntry[], userId: number) {
   // Clear cache after save
   pendingRequests.delete(`schedule-${userId}`);
 
@@ -360,7 +423,7 @@ export async function getTimetable(userId: number) {
   return getSchedule(userId);
 }
 
-export async function saveTimetable(payload: any, userId: number) {
+export async function saveTimetable(payload: ScheduleEntry[], userId: number) {
   return saveSchedule(payload, userId);
 }
 

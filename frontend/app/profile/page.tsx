@@ -6,7 +6,7 @@ import BottomNav from "@/components/BottomNav";
 import { clearAllUserData, getUser, updateUser } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
 import { useAppUser } from "@/lib/user";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, UserRound } from "lucide-react";
 
 type EditField = "name" | "college" | "branch" | "semester" | "section" | null;
 
@@ -119,13 +119,13 @@ export default function ProfilePage() {
 
   if (!appUser) {
     return (
-      <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
-        <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
+      <div className="auth-shell">
+        <div className="auth-card">
           <h1 className="text-2xl font-bold">BunkMax</h1>
           <p className="text-sm text-gray-300">Please login to continue.</p>
           <a
             href="/login"
-            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
+            className="primary-btn inline-flex items-center justify-center px-4"
           >
             Go to Login
           </a>
@@ -162,8 +162,8 @@ export default function ProfilePage() {
 
         <div className="glass-card p-4">
           <div className="flex items-center gap-4">
-            <div className="h-16 w-16 shrink-0 rounded-2xl border border-white/10 bg-white/10 flex items-center justify-center text-2xl">
-              👤
+            <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border border-[#1d9bf0]/30 bg-[#1d9bf0]/12 text-[#8ecdf8]">
+              <UserRound size={30} aria-hidden="true" />
             </div>
 
             <div className="min-w-0">
@@ -214,7 +214,7 @@ export default function ProfilePage() {
           type="button"
           onClick={handleSaveProfile}
           disabled={saving}
-          className="w-full rounded-2xl bg-gradient-to-r from-[#f59e0b] to-[#fde68a] px-4 py-3 font-semibold text-black shadow-[0_10px_30px_rgba(245,158,11,0.25)] hover:opacity-95 active:scale-[0.99] transition disabled:opacity-60"
+          className="primary-btn disabled:opacity-60"
         >
           {saving ? "Updating..." : "Update Profile"}
         </button>
@@ -223,7 +223,7 @@ export default function ProfilePage() {
           type="button"
           onClick={() => setShowClearModal(true)}
           disabled={clearing}
-          className="w-full rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 font-medium text-red-200 hover:bg-red-500/15 active:scale-[0.99] transition disabled:opacity-60"
+          className="w-full rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 font-medium text-red-200 hover:bg-red-500/15 active:scale-[0.99] transition disabled:opacity-60"
         >
           {clearing ? "Clearing..." : "Clear All Data"}
         </button>
@@ -231,7 +231,7 @@ export default function ProfilePage() {
         <button
           type="button"
           onClick={() => signOut({ callbackUrl: "/login" })}
-          className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-medium text-white hover:bg-white/10 active:scale-[0.99] transition"
+          className="secondary-btn"
         >
           Sign Out
         </button>
@@ -241,14 +241,14 @@ export default function ProfilePage() {
 
       {editingField && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-[360px] rounded-3xl border border-white/10 bg-[#141824]/95 p-6 shadow-[0_20px_60px_rgba(0,0,0,0.55)]">
+          <div className="w-full max-w-[360px] rounded-xl border border-white/10 bg-[#101312]/95 p-6 shadow-[0_20px_60px_rgba(0,0,0,0.55)]">
             <h3 className="text-xl font-bold text-white">Edit {capitalize(editingField)}</h3>
 
             <input
               autoFocus
               value={editValue}
               onChange={(e) => setEditValue(e.target.value)}
-              className="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-gray-500"
+              className="input-ui mt-4"
               placeholder={`Enter ${editingField}`}
             />
 
@@ -259,7 +259,7 @@ export default function ProfilePage() {
                   setEditingField(null);
                   setEditValue("");
                 }}
-                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-medium text-white hover:bg-white/10 transition"
+                className="secondary-btn"
               >
                 Cancel
               </button>
@@ -267,7 +267,7 @@ export default function ProfilePage() {
               <button
                 type="button"
                 onClick={saveField}
-                className="rounded-2xl bg-gradient-to-r from-[#f59e0b] to-[#fde68a] px-4 py-3 font-semibold text-black hover:opacity-95 transition"
+                className="primary-btn"
               >
                 Save
               </button>
@@ -278,7 +278,7 @@ export default function ProfilePage() {
 
       {showClearModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-[360px] rounded-3xl border border-white/10 bg-[#141824]/95 p-6 shadow-[0_20px_60px_rgba(0,0,0,0.55)]">
+          <div className="w-full max-w-[360px] rounded-xl border border-white/10 bg-[#101312]/95 p-6 shadow-[0_20px_60px_rgba(0,0,0,0.55)]">
             <h3 className="text-xl font-bold text-white">Clear All Data?</h3>
             <p className="mt-3 text-sm leading-relaxed text-gray-300">
               This will delete all your saved subjects and schedule data. This action cannot be undone.
@@ -288,7 +288,7 @@ export default function ProfilePage() {
               <button
                 type="button"
                 onClick={() => setShowClearModal(false)}
-                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-medium text-white hover:bg-white/10 transition"
+                className="secondary-btn"
               >
                 Cancel
               </button>
@@ -297,7 +297,7 @@ export default function ProfilePage() {
                 type="button"
                 onClick={handleClearAllData}
                 disabled={clearing}
-                className="rounded-2xl bg-gradient-to-r from-red-600 to-orange-500 px-4 py-3 font-semibold text-white hover:opacity-95 transition disabled:opacity-60"
+                className="rounded-lg bg-red-500 px-4 py-3 font-semibold text-white hover:bg-red-400 transition disabled:opacity-60"
               >
                 {clearing ? "Deleting..." : "Yes, Delete"}
               </button>

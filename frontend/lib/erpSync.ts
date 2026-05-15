@@ -1,3 +1,24 @@
+import { API_BASE } from "@/lib/api";
+
+type ErpSubject = {
+  subjectid: string;
+  subject_name: string;
+};
+
+type ErpAttendanceStats = {
+  totalsessions: number;
+  presentSessionsCount: number;
+  percentage?: string | number;
+};
+
+type ErpSubjectResponse = {
+  data?: Record<string, Record<string, ErpSubject[]>>;
+};
+
+type ErpAttendanceResponse = {
+  data?: Record<string, ErpAttendanceStats>;
+};
+
 export async function autoSyncERP(userId: number) {
   try {
     // 1. Fetch subjects from ERP
@@ -10,7 +31,7 @@ export async function autoSyncERP(userId: number) {
     );
 
     const subjectsText = await subRes.text();
-    const subjectsJson = JSON.parse(subjectsText);
+    const subjectsJson = JSON.parse(subjectsText) as ErpSubjectResponse;
 
     // 2. Fetch attendance
     const attRes = await fetch(
@@ -22,18 +43,19 @@ export async function autoSyncERP(userId: number) {
     );
 
     const attendanceText = await attRes.text();
-    const attendanceJson = JSON.parse(attendanceText);
+    const attendanceJson = JSON.parse(attendanceText) as ErpAttendanceResponse;
 
     // 3. Extract subjects
-    const stream = Object.keys(subjectsJson.data)[0];
-    const group = Object.keys(subjectsJson.data[stream])[0];
-    const subjects = subjectsJson.data[stream][group] || [];
+    const subjectData = subjectsJson.data || {};
+    const stream = Object.keys(subjectData)[0];
+    const group = stream ? Object.keys(subjectData[stream] || {})[0] : "";
+    const subjects = stream && group ? subjectData[stream]?.[group] || [] : [];
 
     const attendance = attendanceJson.data || {};
 
     // 4. Send to backend
     const res = await fetch(
-      `${process.env.NEXT_PUBLIC_API_BASE}/users/${userId}/import-attendance`,
+      `${API_BASE}/users/${userId}/import-attendance`,
       {
         method: "POST",
         headers: {
@@ -46,16 +68,16 @@ export async function autoSyncERP(userId: number) {
       }
     );
 
-    const data = await res.json();
+    const data = (await res.json()) as { message?: string };
 
     return {
       success: true,
-      message: data.message,
+      message: data.message || "Sync completed",
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     return {
       success: false,
-      message: err.message || "Sync failed",
+      message: err instanceof Error ? err.message : "Sync failed",
     };
   }
 }

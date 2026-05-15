@@ -13,6 +13,12 @@ type PreviewRow = {
   percentage: number;
 };
 
+type ImportAttendancePayload = {
+  totalsessions: number;
+  presentSessionsCount: number;
+  percentage: string;
+};
+
 type PercentageRow = {
   subject_name: string;
   percentage: number;
@@ -300,7 +306,7 @@ export default function ImportPage() {
         subject_name: row.subject_name,
       }));
 
-      const attendance: Record<string, any> = {};
+      const attendance: Record<string, ImportAttendancePayload> = {};
 
       previewRows.forEach((row) => {
         attendance[row.subjectid] = {

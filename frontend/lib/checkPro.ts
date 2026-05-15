@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 
-export function useProGuard(appUser: any) {
+export function useProGuard(appUser: { is_pro?: boolean } | null | undefined) {
   const router = useRouter();
 
   function checkPro() {

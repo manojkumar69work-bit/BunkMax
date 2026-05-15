@@ -1,27 +1,24 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import BottomNav from "@/components/BottomNav";
-import { getSubjects, getTimetable, saveTimetable } from "@/lib/api";
+import {
+  getSubjects,
+  getTimetable,
+  saveTimetable,
+  type ScheduleEntry,
+  type SubjectResponse,
+} from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 import FullScreenLoader from "@/components/FullScreenLoader";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const PERIODS = 6;
 
-type SubjectItem = {
-  subject_name: string;
-};
-
 type TimetableMap = Record<string, string[]>;
 
-function normalizeTimetable(data: any): TimetableMap {
-  if (!data) return {};
-
-  if (!Array.isArray(data)) {
-    return data;
-  }
-
+function normalizeTimetable(data: ScheduleEntry[]): TimetableMap {
   const map: TimetableMap = {};
 
   for (const row of data) {
@@ -44,7 +41,7 @@ function normalizeTimetable(data: any): TimetableMap {
 export default function SchedulePage() {
   const { appUser, loadingUser } = useAppUser();
 
-  const [subjects, setSubjects] = useState<string[]>([]);
+  const [subjects, setSubjects] = useState<SubjectResponse[]>([]);
   const [timetable, setTimetable] = useState<TimetableMap>({});
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
@@ -67,7 +64,7 @@ export default function SchedulePage() {
         getTimetable(userId),
       ]);
 
-      setSubjects(subjectData.map((s: SubjectItem) => s.subject_name));
+      setSubjects(subjectData);
       setTimetable(normalizeTimetable(timetableData));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load schedule");
@@ -110,6 +107,7 @@ export default function SchedulePage() {
   }
 
   const currentDayPeriods = timetable[selectedDay] || Array(PERIODS).fill("");
+  const subjectNames = subjects.map((subject) => subject.subject_name);
 
   const daySubjectCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -122,21 +120,40 @@ export default function SchedulePage() {
     return counts;
   }, [timetable]);
 
+  const selectedDayFilledPeriods = currentDayPeriods.filter((item) =>
+    String(item || "").trim()
+  ).length;
+
+  const totalScheduledPeriods = DAYS.reduce(
+    (sum, day) => sum + (daySubjectCounts[day] || 0),
+    0
+  );
+
+  const lowestSubjects = [...subjects]
+    .sort((a, b) => {
+      const aPct =
+        a.total_classes > 0 ? a.attended_classes / a.total_classes : 0;
+      const bPct =
+        b.total_classes > 0 ? b.attended_classes / b.total_classes : 0;
+      return aPct - bPct;
+    })
+    .slice(0, 4);
+
   if (loadingUser) {
     return <FullScreenLoader label="Loading BunkMax..." />;
   }
 
   if (!appUser) {
     return (
-      <div className="min-h-screen bg-[#070a10] flex items-center justify-center px-4">
-        <div className="w-full max-w-[380px] rounded-3xl border border-white/10 bg-white/5 p-8 text-center backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] space-y-6">
+      <div className="auth-shell">
+        <div className="auth-card">
           <h1 className="text-2xl font-bold">BunkMax</h1>
           <p className="text-sm text-gray-300">
             Please login to continue.
           </p>
           <a
             href="/login"
-            className="inline-flex w-full items-center justify-center rounded-2xl border border-white/20 bg-white text-black px-4 py-3 font-semibold hover:bg-gray-200 active:scale-[0.98] transition"
+            className="primary-btn inline-flex items-center justify-center px-4"
           >
             Go to Login
           </a>
@@ -176,7 +193,60 @@ export default function SchedulePage() {
         </div>
       ) : (
         <>
-          <div className="section-title">Choose Day</div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="glass-card p-3">
+              <p className="metric-title">Subjects</p>
+              <p className="metric-value">{subjects.length}</p>
+            </div>
+            <div className="glass-card p-3">
+              <p className="metric-title">Periods</p>
+              <p className="metric-value">{totalScheduledPeriods}</p>
+            </div>
+            <div className="glass-card p-3">
+              <p className="metric-title">{selectedDay.slice(0, 3)}</p>
+              <p className="metric-value">{selectedDayFilledPeriods}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="section-title">Subjects</div>
+            <Link
+              href="/subjects"
+              className="rounded-full border border-[#2f3336] px-3 py-1.5 text-xs font-bold text-[#1d9bf0]"
+            >
+              Manage
+            </Link>
+          </div>
+
+          <div className="glass-card p-3">
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {lowestSubjects.map((subject) => {
+                const percentage =
+                  subject.total_classes > 0
+                    ? (subject.attended_classes / subject.total_classes) * 100
+                    : 0;
+
+                return (
+                  <div
+                    key={subject.id}
+                    className="min-w-[190px] rounded-xl border border-[#2f3336] bg-black p-3"
+                  >
+                    <p className="truncate text-sm font-bold">
+                      {subject.subject_name}
+                    </p>
+                    <p className="mt-2 text-xl font-black">
+                      {percentage.toFixed(1)}%
+                    </p>
+                    <p className="mt-1 text-xs text-[#71767b]">
+                      {subject.attended_classes}/{subject.total_classes}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="section-title">Timetable</div>
 
           <div className="grid grid-cols-2 gap-3">
             {DAYS.map((day) => {
@@ -191,10 +261,10 @@ export default function SchedulePage() {
                     setSelectedDay(day);
                     setMessage("");
                   }}
-                  className={`rounded-2xl border px-4 py-4 text-left transition ${
+                  className={`rounded-lg border px-4 py-4 text-left transition ${
                     active
-                      ? "border-white/20 bg-white/15 text-white"
-                      : "border-white/10 bg-white/5 text-gray-300 hover:bg-white/10"
+                      ? "border-[#1d9bf0]/45 bg-[#1d9bf0]/12 text-white"
+                      : "border-[#2f3336] bg-[#16181c] text-gray-300 hover:bg-[#202327]"
                   }`}
                 >
                   <div className="font-semibold">{day}</div>
@@ -210,15 +280,17 @@ export default function SchedulePage() {
 
           <div className="soft-card p-4 space-y-3">
             {Array.from({ length: PERIODS }).map((_, i) => (
-              <div key={i} className="space-y-1">
-                <label className="text-xs text-gray-400">Period {i + 1}</label>
+              <div key={i} className="grid grid-cols-[68px_1fr] items-center gap-3">
+                <label className="text-xs font-bold uppercase text-[#71767b]">
+                  P{i + 1}
+                </label>
                 <select
                   value={currentDayPeriods[i] || ""}
                   onChange={(e) => updateCell(i, e.target.value)}
                   className="input-ui"
                 >
                   <option value="">Select subject</option>
-                  {subjects.map((subject) => (
+                  {subjectNames.map((subject) => (
                     <option key={subject} value={subject}>
                       {subject}
                     </option>

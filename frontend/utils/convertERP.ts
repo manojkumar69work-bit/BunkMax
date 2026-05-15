@@ -41,8 +41,20 @@ export function convertERPText(text: string) {
   }
 
   // Convert to backend format
-  const subjects: any[] = [];
-  const attendance: any = {};
+  const subjects: Array<{
+    subjectid: string;
+    subject_name: string;
+    subject_type: string;
+  }> = [];
+
+  const attendance: Record<
+    string,
+    {
+      totalsessions: number;
+      presentSessionsCount: number;
+      percentage: number;
+    }
+  > = {};
 
   Object.keys(percentageMap).forEach((subject, index) => {
     const percentage = percentageMap[subject];
