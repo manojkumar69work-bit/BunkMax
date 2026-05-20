@@ -192,3 +192,76 @@ def send_push_notification(
         "failure_count": failure_count,
         "token_count": len(tokens),
     }
+
+
+def send_push_to_tokens(
+    tokens: list[str],
+    title: str,
+    body: str,
+    *,
+    url: str = "/",
+    tag: str = "bunkmax-alert",
+    ttl_seconds: int = 3600,
+) -> dict[str, Any]:
+    clean_tokens = [token.strip() for token in tokens if token.strip()]
+    clean_title = title.strip()
+    clean_body = body.strip()
+
+    if not clean_tokens:
+        return {
+            "success_count": 0,
+            "failure_count": 0,
+            "token_count": 0,
+        }
+
+    if not clean_title:
+        raise ValueError("title is required")
+
+    if not clean_body:
+        raise ValueError("body is required")
+
+    _initialize_firebase_admin()
+
+    link = _build_link(url)
+    success_count = 0
+    failure_count = 0
+    invalid_tokens: list[str] = []
+
+    for token_chunk in _chunked(clean_tokens, MAX_MULTICAST_TOKENS):
+        webpush = messaging.WebpushConfig(
+            headers={
+                "TTL": str(ttl_seconds),
+                "Urgency": "normal",
+            },
+            fcm_options=messaging.WebpushFCMOptions(link=link) if link else None,
+        )
+
+        message = messaging.MulticastMessage(
+            tokens=token_chunk,
+            data={
+                "title": clean_title,
+                "body": clean_body,
+                "url": url if url.startswith("/") else "/",
+                "tag": tag,
+                "icon": DEFAULT_ICON_PATH,
+            },
+            webpush=webpush,
+        )
+
+        response = messaging.send_each_for_multicast(message)
+        success_count += response.success_count
+        failure_count += response.failure_count
+
+        for token, send_response in zip(token_chunk, response.responses):
+            if not send_response.success and _is_invalid_token_error(
+                send_response.exception
+            ):
+                invalid_tokens.append(token)
+
+    _delete_tokens(invalid_tokens)
+
+    return {
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "token_count": len(clean_tokens),
+    }

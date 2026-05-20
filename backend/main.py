@@ -1,15 +1,17 @@
 from datetime import datetime, timedelta
 from secrets import compare_digest
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 from zoneinfo import ZoneInfo
 import logging
 import math
 import os
 
 from database import get_conn
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
+
+from push_notifications import send_push_to_tokens
 
 
 logging.basicConfig(level=logging.INFO)
@@ -117,6 +119,31 @@ def require_admin_db_routes_enabled(
         x_bunkmax_admin_secret,
         "admin",
     )
+
+
+def require_notification_cron_secret(
+    secret: Optional[str] = Query(default=None),
+    x_bunkmax_cron_secret: Optional[str] = Header(
+        default=None,
+        alias="x-bunkmax-cron-secret",
+    ),
+) -> None:
+    expected_secret = (
+        os.getenv("NOTIFICATION_CRON_SECRET", "").strip()
+        or os.getenv("ADMIN_API_SECRET", "").strip()
+    )
+
+    if not expected_secret:
+        logger.error("NOTIFICATION_CRON_SECRET or ADMIN_API_SECRET is not configured")
+        raise HTTPException(
+            status_code=500,
+            detail="Notification cron secret is not configured",
+        )
+
+    provided_secret = x_bunkmax_cron_secret or secret
+
+    if not provided_secret or not compare_digest(provided_secret, expected_secret):
+        raise HTTPException(status_code=401, detail="Invalid notification cron secret")
 
 
 class ERPImportPayload(BaseModel):
@@ -263,6 +290,14 @@ def get_today_name() -> str:
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%A")
 
 
+def get_tomorrow_name() -> str:
+    return (datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=1)).strftime("%A")
+
+
+def get_notification_date() -> str:
+    return datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+
+
 def load_subjects_raw(user_id: int) -> list[dict[str, Any]]:
     conn = get_conn()
     try:
@@ -353,6 +388,177 @@ def build_day_map(
         classes.sort(key=lambda item: int(item["period_no"]))
 
     return day_map
+
+
+def format_class_count(count: int) -> str:
+    if count == 1:
+        return "1 class"
+
+    return f"{count} classes"
+
+
+def build_morning_notification(class_count: int) -> tuple[str, str]:
+    title = "Today's classes"
+
+    if class_count <= 0:
+        return title, "No classes are saved for today. Check BunkMax if your timetable changed."
+
+    return (
+        title,
+        f"You have {format_class_count(class_count)} today. Check skippable classes.",
+    )
+
+
+def build_evening_notification(class_count: int) -> tuple[str, str]:
+    title = "Check tomorrow"
+
+    if class_count <= 0:
+        return title, "Check tomorrow's classes and attendance in BunkMax."
+
+    return (
+        title,
+        f"Tomorrow has {format_class_count(class_count)} scheduled. Check classes and attendance in BunkMax.",
+    )
+
+
+def load_unsent_notification_recipients(
+    notification_type: str,
+    sent_date: str,
+    day_name: str,
+) -> list[dict[str, Any]]:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    push_tokens.user_id,
+                    push_tokens.token,
+                    COALESCE(classes.class_count, 0) AS class_count
+                FROM push_tokens
+                LEFT JOIN (
+                    SELECT user_id, COUNT(*) AS class_count
+                    FROM timetable
+                    WHERE day_name = %s
+                      AND subject_name IS NOT NULL
+                      AND TRIM(subject_name) != ''
+                    GROUP BY user_id
+                ) classes ON classes.user_id = push_tokens.user_id
+                LEFT JOIN notification_logs
+                  ON notification_logs.user_id = push_tokens.user_id
+                 AND notification_logs.notification_type = %s
+                 AND notification_logs.sent_date = %s
+                WHERE notification_logs.id IS NULL
+                ORDER BY push_tokens.user_id
+            """, (day_name, notification_type, sent_date))
+
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def mark_notifications_sent(
+    user_ids: set[int],
+    notification_type: str,
+    sent_date: str,
+) -> None:
+    if not user_ids:
+        return
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            for user_id in user_ids:
+                cur.execute("""
+                    INSERT INTO notification_logs (
+                        user_id,
+                        notification_type,
+                        sent_date,
+                        sent_at
+                    )
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (user_id, notification_type, sent_date)
+                    DO NOTHING
+                """, (user_id, notification_type, sent_date))
+
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def send_class_count_notification_batch(
+    notification_type: str,
+    day_name: str,
+    tag: str,
+    build_message: Callable[[int], tuple[str, str]],
+) -> dict[str, Any]:
+    sent_date = get_notification_date()
+    rows = load_unsent_notification_recipients(
+        notification_type,
+        sent_date,
+        day_name,
+    )
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for row in rows:
+        try:
+            class_count = int(row.get("class_count") or 0)
+            user_id = int(row["user_id"])
+        except Exception:
+            continue
+
+        token = clean_text(row.get("token"))
+
+        if not token:
+            continue
+
+        title, body = build_message(class_count)
+        group = grouped.setdefault(
+            (title, body),
+            {
+                "tokens": [],
+                "user_ids": set(),
+            },
+        )
+
+        group["tokens"].append(token)
+        group["user_ids"].add(user_id)
+
+    token_count = 0
+    success_count = 0
+    failure_count = 0
+    logged_user_ids: set[int] = set()
+
+    for (title, body), group in grouped.items():
+        result = send_push_to_tokens(
+            group["tokens"],
+            title,
+            body,
+            url="/",
+            tag=tag,
+            ttl_seconds=43200,
+        )
+
+        token_count += int(result.get("token_count") or 0)
+        success_count += int(result.get("success_count") or 0)
+        failure_count += int(result.get("failure_count") or 0)
+        logged_user_ids.update(group["user_ids"])
+        mark_notifications_sent(group["user_ids"], notification_type, sent_date)
+
+    return {
+        "message": "Notifications processed.",
+        "notification_type": notification_type,
+        "day_name": day_name,
+        "date": sent_date,
+        "users_notified": len(logged_user_ids),
+        "token_count": token_count,
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "groups": len(grouped),
+    }
 
 
 def get_next_valid_class_day(day_map: dict[str, list[dict[str, Any]]]) -> Optional[str]:
@@ -485,6 +691,17 @@ def init_db(_: None = Depends(require_admin_db_routes_enabled)):
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS notification_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    notification_type TEXT NOT NULL,
+                    sent_date DATE NOT NULL,
+                    sent_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, notification_type, sent_date)
+                );
+            """)
+
+            cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
                 ON users (LOWER(email));
             """)
@@ -507,6 +724,11 @@ def init_db(_: None = Depends(require_admin_db_routes_enabled)):
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_push_tokens_user_id
                 ON push_tokens(user_id);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_notification_logs_user_date
+                ON notification_logs(user_id, sent_date);
             """)
 
             conn.commit()
@@ -578,7 +800,23 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS notification_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    notification_type TEXT NOT NULL,
+                    sent_date DATE NOT NULL,
+                    sent_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, notification_type, sent_date)
+                );
+            """)
+
+            cur.execute("""
                 DELETE FROM push_tokens
+                WHERE user_id NOT IN (SELECT id FROM users);
+            """)
+
+            cur.execute("""
+                DELETE FROM notification_logs
                 WHERE user_id NOT IN (SELECT id FROM users);
             """)
 
@@ -800,6 +1038,11 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
                 ON push_tokens(user_id);
             """)
 
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_notification_logs_user_date
+                ON notification_logs(user_id, sent_date);
+            """)
+
             conn.commit()
 
         logger.info("Database migration completed successfully")
@@ -991,6 +1234,46 @@ def save_push_token(
         raise HTTPException(status_code=500, detail="Failed to save push token")
     finally:
         conn.close()
+
+
+@app.get("/cron/notifications/morning")
+@app.post("/cron/notifications/morning")
+def send_morning_notifications(
+    _: None = Depends(require_notification_cron_secret),
+):
+    try:
+        return send_class_count_notification_batch(
+            notification_type="morning_summary",
+            day_name=get_today_name(),
+            tag="bunkmax-morning-summary",
+            build_message=build_morning_notification,
+        )
+    except Exception:
+        logger.exception("Failed to send morning notifications")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to send morning notifications",
+        )
+
+
+@app.get("/cron/notifications/evening")
+@app.post("/cron/notifications/evening")
+def send_evening_notifications(
+    _: None = Depends(require_notification_cron_secret),
+):
+    try:
+        return send_class_count_notification_batch(
+            notification_type="evening_reminder",
+            day_name=get_tomorrow_name(),
+            tag="bunkmax-evening-reminder",
+            build_message=build_evening_notification,
+        )
+    except Exception:
+        logger.exception("Failed to send evening notifications")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to send evening notifications",
+        )
 
 
 @app.post("/users/{user_id}/import-attendance")
