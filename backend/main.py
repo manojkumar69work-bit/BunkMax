@@ -163,6 +163,13 @@ class GoogleUserPayload(BaseModel):
     name: str = Field(default="Student", max_length=255)
 
 
+class PushTokenPayload(BaseModel):
+    user_id: int = Field(..., ge=1)
+    token: str = Field(..., min_length=20, max_length=4096)
+    platform: str = Field(default="", max_length=512)
+    user_agent: str = Field(default="", max_length=512)
+
+
 class PlanPayload(BaseModel):
     mode: Literal["tomorrow", "next_n_days", "selected_weekdays"]
     n_days: Optional[int] = Field(default=None, ge=1, le=365)
@@ -466,6 +473,18 @@ def init_db(_: None = Depends(require_admin_db_routes_enabled)):
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS push_tokens (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token TEXT NOT NULL UNIQUE,
+                    platform TEXT DEFAULT '',
+                    user_agent TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
                 ON users (LOWER(email));
             """)
@@ -483,6 +502,11 @@ def init_db(_: None = Depends(require_admin_db_routes_enabled)):
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timetable_user_day
                 ON timetable(user_id, day_name);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_push_tokens_user_id
+                ON push_tokens(user_id);
             """)
 
             conn.commit()
@@ -539,6 +563,23 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
                 )
                 OR period_no < 1
                 OR period_no > 6;
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS push_tokens (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token TEXT NOT NULL UNIQUE,
+                    platform TEXT DEFAULT '',
+                    user_agent TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            cur.execute("""
+                DELETE FROM push_tokens
+                WHERE user_id NOT IN (SELECT id FROM users);
             """)
 
             cur.execute("""
@@ -754,6 +795,11 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
                 ON timetable(user_id, day_name);
             """)
 
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_push_tokens_user_id
+                ON push_tokens(user_id);
+            """)
+
             conn.commit()
 
         logger.info("Database migration completed successfully")
@@ -888,6 +934,61 @@ def update_user(
     except Exception:
         logger.exception("Failed to update user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to update user")
+    finally:
+        conn.close()
+
+
+@app.post("/api/save-token")
+def save_push_token(
+    payload: PushTokenPayload,
+    _: None = Depends(require_service_secret),
+):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id
+                FROM users
+                WHERE id = %s
+            """, (payload.user_id,))
+
+            user = cur.fetchone()
+
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            cur.execute("""
+                INSERT INTO push_tokens (
+                    user_id,
+                    token,
+                    platform,
+                    user_agent,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (token)
+                DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    platform = EXCLUDED.platform,
+                    user_agent = EXCLUDED.user_agent,
+                    updated_at = NOW()
+            """, (
+                payload.user_id,
+                payload.token.strip(),
+                payload.platform.strip(),
+                payload.user_agent.strip(),
+            ))
+
+            conn.commit()
+
+        return {"message": "Push token saved successfully."}
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to save push token for user %s", payload.user_id)
+        raise HTTPException(status_code=500, detail="Failed to save push token")
     finally:
         conn.close()
 

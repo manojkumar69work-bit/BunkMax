@@ -5,6 +5,7 @@ import { signOut } from "next-auth/react";
 import BottomNav from "@/components/BottomNav";
 import { clearAllUserData, getUser, updateUser } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
+import PushNotificationSettings from "@/components/PushNotificationSettings";
 import { useAppUser } from "@/lib/user";
 import { ChevronRight, UserRound } from "lucide-react";
 
@@ -176,6 +177,8 @@ export default function ProfilePage() {
             </div>
           </div>
         </div>
+
+        <PushNotificationSettings userId={appUser.id} />
 
         <div className="space-y-3">
           <ProfileRow
