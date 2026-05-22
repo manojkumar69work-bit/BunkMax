@@ -20,6 +20,11 @@ logger = logging.getLogger("bunkmax")
 app = FastAPI(title="BunkMax API")
 
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "service": "bunkmax-api"}
+
+
 def get_allowed_origins() -> list[str]:
     default_origins = [
         "http://localhost:3000",
