@@ -113,7 +113,11 @@ export default function PaywallModal({
       })
       .catch((err) => {
         console.error("Failed to load plans:", err);
-        setError("Could not load plans. Please try again.");
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Could not load plans. Please try again."
+        );
       })
       .finally(() => {
         setLoadingPlans(false);
