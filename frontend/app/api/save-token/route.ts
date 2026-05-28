@@ -15,6 +15,9 @@ type AppUser = {
   semester: string;
   section: string;
   default_target: number;
+  is_pro?: boolean;
+  subscription_plan?: string;
+  subscription_status?: string;
 };
 
 type SaveTokenBody = {

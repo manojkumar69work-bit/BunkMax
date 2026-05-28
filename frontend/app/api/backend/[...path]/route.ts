@@ -1,6 +1,8 @@
 import { auth } from "@/auth";
 import { NextRequest } from "next/server";
 
+export const dynamic = "force-dynamic";
+
 const API_BASE =
   process.env.BACKEND_API_BASE ||
   "http://127.0.0.1:8000";
@@ -16,6 +18,9 @@ type AppUser = {
   semester: string;
   section: string;
   default_target: number;
+  is_pro?: boolean;
+  subscription_plan?: string;
+  subscription_status?: string;
 };
 
 type RouteContext = {
@@ -92,6 +97,10 @@ function requestedUserId(path: string[]) {
   return id;
 }
 
+function isSubscriptionRequest(path: string[]) {
+  return path[0] === "users" && path[2] === "subscription";
+}
+
 async function proxyToBackend(request: NextRequest, context: RouteContext) {
   const params = await context.params;
   const path = params.path || [];
@@ -110,6 +119,16 @@ async function proxyToBackend(request: NextRequest, context: RouteContext) {
 
   if (!userIdFromPath || userIdFromPath !== userOrResponse.id) {
     return Response.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  if (!userOrResponse.is_pro && !isSubscriptionRequest(path)) {
+    return Response.json(
+      {
+        error: "Subscription required",
+        detail: "Please choose a plan to unlock BunkMax.",
+      },
+      { status: 402 }
+    );
   }
 
   const headers = new Headers();

@@ -11,6 +11,10 @@ export type AppUser = {
   semester: string;
   section: string;
   default_target: number;
+  is_pro: boolean;
+  subscription_plan: string;
+  subscription_status: string;
+  subscription_renews_at?: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -33,6 +37,19 @@ function normalizeUser(data: unknown): AppUser | null {
     semester: typeof data.semester === "string" ? data.semester : "",
     section: typeof data.section === "string" ? data.section : "",
     default_target: Number(data.default_target || 75),
+    is_pro: data.is_pro === true,
+    subscription_plan:
+      typeof data.subscription_plan === "string"
+        ? data.subscription_plan
+        : "free",
+    subscription_status:
+      typeof data.subscription_status === "string"
+        ? data.subscription_status
+        : "free",
+    subscription_renews_at:
+      typeof data.subscription_renews_at === "string"
+        ? data.subscription_renews_at
+        : null,
   };
 }
 
@@ -72,11 +89,8 @@ export function useAppUser() {
         });
 
         if (!res.ok) {
-          if (!cachedUser) {
-            setAppUser(null);
-            localStorage.removeItem("bunkmax_user");
-          }
-
+          setAppUser(null);
+          localStorage.removeItem("bunkmax_user");
           return;
         }
 

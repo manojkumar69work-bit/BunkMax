@@ -2,16 +2,26 @@ from datetime import datetime, timedelta
 from secrets import compare_digest
 from typing import Any, Callable, Literal, Optional
 from zoneinfo import ZoneInfo
+import hashlib
+import hmac
 import logging
 import math
 import os
 
 from database import get_conn
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
+import razorpay
 
 from push_notifications import send_push_to_tokens
+
+razorpay_client = None
+if os.getenv("RAZORPAY_KEY_ID") and os.getenv("RAZORPAY_KEY_SECRET"):
+    razorpay_client = razorpay.Client(
+        auth=(os.getenv("RAZORPAY_KEY_ID", ""), os.getenv("RAZORPAY_KEY_SECRET", ""))
+    )
+
 
 
 logging.basicConfig(level=logging.INFO)
@@ -218,14 +228,285 @@ class CalendarPlanPayload(BaseModel):
     days: list[CalendarPlanDay]
 
 
+class SubscriptionCheckoutPayload(BaseModel):
+    plan_id: Literal["pro_monthly", "pro_yearly"]
+
+
+class SubscriptionPaymentVerificationPayload(BaseModel):
+    razorpay_payment_id: Optional[str] = Field(default=None, max_length=255)
+    razorpay_order_id: Optional[str] = Field(default=None, max_length=255)
+    razorpay_signature: Optional[str] = Field(default=None, max_length=1024)
+
+
+class SubscriptionUpdatePayload(BaseModel):
+    plan_id: Literal["free", "pro_monthly", "pro_yearly"] = "free"
+    status: Literal["free", "active", "cancelled", "past_due", "expired"] = "free"
+    renews_at: Optional[datetime] = None
+    provider: str = Field(default="", max_length=80)
+    reference: str = Field(default="", max_length=255)
+
+    @model_validator(mode="after")
+    def validate_subscription_update(self):
+        if self.plan_id == "free":
+            self.status = "free"
+            self.renews_at = None
+            return self
+
+        if self.status == "free":
+            raise ValueError("Paid plans must use a paid subscription status")
+
+        if self.status == "active" and self.renews_at is None:
+            self.renews_at = datetime.now(ZoneInfo("UTC")) + PLAN_DURATIONS[self.plan_id]
+
+        return self
+
+
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 VALID_DAYS = set(ALL_DAYS)
 CLASS_PERIODS = 6
 
+FREE_SUBSCRIPTION_PLAN = {
+    "id": "free",
+    "name": "Free",
+    "price_rupees": 0,
+    "billing_interval": "forever",
+    "description": "Subscription required to unlock BunkMax.",
+    "features": [],
+    "highlighted": False,
+}
+
+SUBSCRIPTION_PLANS = [
+    {
+        "id": "pro_monthly",
+        "name": "3 Month Plan",
+        "price_rupees": 49,
+        "billing_interval": "3 months",
+        "description": "Affordable access for a full mid-semester stretch.",
+        "features": [
+            "Calendar-based bunk planning",
+            "Smarter recovery targets",
+            "Priority notification features",
+            "Early access to student tools",
+        ],
+        "highlighted": True,
+    },
+    {
+        "id": "pro_yearly",
+        "name": "Semester Plan",
+        "price_rupees": 89,
+        "billing_interval": "6 months",
+        "description": "Best value for one complete semester.",
+        "features": [
+            "Everything in the 3 Month Plan",
+            "Lower semester price",
+            "Semester-long planning support",
+            "Priority feature requests",
+        ],
+        "highlighted": False,
+    },
+]
+
+PLAN_DURATIONS = {
+    "pro_monthly": timedelta(days=92),
+    "pro_yearly": timedelta(days=183),
+}
+
+USER_SELECT_FIELDS = """
+    id,
+    name,
+    email,
+    college,
+    branch,
+    semester,
+    section,
+    default_target,
+    COALESCE(subscription_plan, 'free') AS subscription_plan,
+    COALESCE(subscription_status, 'free') AS subscription_status,
+    subscription_started_at,
+    subscription_renews_at,
+    COALESCE(subscription_provider, '') AS subscription_provider,
+    COALESCE(subscription_reference, '') AS subscription_reference
+"""
+
+
+def ensure_subscription_columns(conn) -> None:
+    """Keep older databases compatible with the subscription gate."""
+
+    statements = [
+        """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS subscription_plan TEXT DEFAULT 'free';
+        """,
+        """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS subscription_status TEXT DEFAULT 'free';
+        """,
+        """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS subscription_started_at TIMESTAMPTZ;
+        """,
+        """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS subscription_renews_at TIMESTAMPTZ;
+        """,
+        """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS subscription_provider TEXT DEFAULT '';
+        """,
+        """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS subscription_reference TEXT DEFAULT '';
+        """,
+        """
+            UPDATE users
+            SET subscription_plan = 'free'
+            WHERE subscription_plan IS NULL
+               OR subscription_plan NOT IN ('free', 'pro_monthly', 'pro_yearly');
+        """,
+        """
+            UPDATE users
+            SET subscription_status = 'free'
+            WHERE subscription_status IS NULL
+               OR subscription_status NOT IN (
+                    'free',
+                    'active',
+                    'cancelled',
+                    'past_due',
+                    'expired'
+               );
+        """,
+        """
+            UPDATE users
+            SET subscription_status = 'free',
+                subscription_renews_at = NULL
+            WHERE subscription_plan = 'free';
+        """,
+        """
+            UPDATE users
+            SET subscription_provider = ''
+            WHERE subscription_provider IS NULL;
+        """,
+        """
+            UPDATE users
+            SET subscription_reference = ''
+            WHERE subscription_reference IS NULL;
+        """,
+    ]
+
+    with conn.cursor() as cur:
+        for statement in statements:
+            cur.execute(statement)
+
+    conn.commit()
+
 
 def clean_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def get_subscription_plan(plan_id: str) -> dict[str, Any]:
+    if plan_id == "free":
+        return FREE_SUBSCRIPTION_PLAN
+
+    for plan in SUBSCRIPTION_PLANS:
+        if plan["id"] == plan_id:
+            return plan
+
+    raise HTTPException(status_code=400, detail="Invalid subscription plan")
+
+
+def subscription_payment_link(plan_id: str) -> str:
+    plan_key = plan_id.upper()
+    return (
+        os.getenv(f"SUBSCRIPTION_{plan_key}_URL", "").strip()
+        or os.getenv(f"RAZORPAY_{plan_key}_LINK", "").strip()
+    )
+
+
+def is_subscription_active(row: dict[str, Any]) -> bool:
+    plan_id = clean_text(row.get("subscription_plan")) or "free"
+    status = clean_text(row.get("subscription_status")) or "free"
+    renews_at = row.get("subscription_renews_at")
+
+    if plan_id == "free" or status != "active":
+        return False
+
+    if renews_at is None:
+        return True
+
+    if isinstance(renews_at, datetime):
+        now = datetime.now(ZoneInfo("UTC"))
+
+        if renews_at.tzinfo is None:
+            renews_at = renews_at.replace(tzinfo=ZoneInfo("UTC"))
+
+        return renews_at >= now
+
+    return False
+
+
+def build_user_response(row: dict[str, Any]) -> dict[str, Any]:
+    user = dict(row)
+    plan_id = clean_text(user.get("subscription_plan")) or "free"
+    status = clean_text(user.get("subscription_status")) or "free"
+
+    user["subscription_plan"] = plan_id
+    user["subscription_status"] = status
+    user["subscription_provider"] = clean_text(user.get("subscription_provider"))
+    user["subscription_reference"] = clean_text(user.get("subscription_reference"))
+    user["is_pro"] = is_subscription_active(user)
+
+    return user
+
+
+def build_subscription_response(row: dict[str, Any]) -> dict[str, Any]:
+    user = build_user_response(row)
+    plan = get_subscription_plan(user["subscription_plan"])
+
+    return {
+        "plan_id": user["subscription_plan"],
+        "plan_name": plan["name"],
+        "status": user["subscription_status"],
+        "is_pro": user["is_pro"],
+        "renews_at": user.get("subscription_renews_at"),
+        "provider": user["subscription_provider"],
+    }
+
+
+def build_order_receipt(user_id: int) -> str:
+    timestamp = int(datetime.now(ZoneInfo("UTC")).timestamp())
+    return f"bm_{user_id}_{timestamp}"
+
+
+def razorpay_error_response(exc: Exception, fallback: str) -> HTTPException:
+    message = str(exc).lower()
+
+    if "auth" in message or "key" in message or "unauthorized" in message:
+        return HTTPException(status_code=401, detail="Razorpay authentication failed")
+
+    return HTTPException(status_code=500, detail=fallback)
+
+
+def verify_razorpay_signature(
+    *,
+    order_id: str,
+    payment_id: str,
+    signature: str,
+) -> bool:
+    key_secret = os.getenv("RAZORPAY_KEY_SECRET", "")
+
+    if not key_secret:
+        raise HTTPException(status_code=500, detail="Razorpay is not configured")
+
+    message = f"{order_id}|{payment_id}".encode("utf-8")
+    expected_signature = hmac.new(
+        key_secret.encode("utf-8"),
+        msg=message,
+        digestmod=hashlib.sha256,
+    ).hexdigest()
+
+    return compare_digest(expected_signature, signature)
 
 
 def calc_overall(subjects: list[dict[str, Any]]) -> float:
@@ -630,6 +911,12 @@ def init_db(_: None = Depends(require_admin_db_routes_enabled)):
                     semester TEXT DEFAULT '',
                     section TEXT DEFAULT '',
                     default_target INTEGER DEFAULT 75,
+                    subscription_plan TEXT DEFAULT 'free',
+                    subscription_status TEXT DEFAULT 'free',
+                    subscription_started_at TIMESTAMPTZ,
+                    subscription_renews_at TIMESTAMPTZ,
+                    subscription_provider TEXT DEFAULT '',
+                    subscription_reference TEXT DEFAULT '',
                     CONSTRAINT users_email_unique UNIQUE (email),
                     CONSTRAINT users_default_target_check
                         CHECK (default_target >= 1 AND default_target <= 100)
@@ -765,6 +1052,75 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
                 WHERE default_target IS NULL
                    OR default_target < 1
                    OR default_target > 100;
+            """)
+
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS subscription_plan TEXT DEFAULT 'free';
+            """)
+
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS subscription_status TEXT DEFAULT 'free';
+            """)
+
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS subscription_started_at TIMESTAMPTZ;
+            """)
+
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS subscription_renews_at TIMESTAMPTZ;
+            """)
+
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS subscription_provider TEXT DEFAULT '';
+            """)
+
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS subscription_reference TEXT DEFAULT '';
+            """)
+
+            cur.execute("""
+                UPDATE users
+                SET subscription_plan = 'free'
+                WHERE subscription_plan IS NULL
+                   OR subscription_plan NOT IN ('free', 'pro_monthly', 'pro_yearly');
+            """)
+
+            cur.execute("""
+                UPDATE users
+                SET subscription_status = 'free'
+                WHERE subscription_status IS NULL
+                   OR subscription_status NOT IN (
+                        'free',
+                        'active',
+                        'cancelled',
+                        'past_due',
+                        'expired'
+                   );
+            """)
+
+            cur.execute("""
+                UPDATE users
+                SET subscription_status = 'free',
+                    subscription_renews_at = NULL
+                WHERE subscription_plan = 'free';
+            """)
+
+            cur.execute("""
+                UPDATE users
+                SET subscription_provider = ''
+                WHERE subscription_provider IS NULL;
+            """)
+
+            cur.execute("""
+                UPDATE users
+                SET subscription_reference = ''
+                WHERE subscription_reference IS NULL;
             """)
 
             cur.execute("""
@@ -1073,21 +1429,23 @@ def auth_google_user(
 
     conn = get_conn()
     try:
+        ensure_subscription_columns(conn)
+
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, name, email, college, branch, semester, section, default_target
+            cur.execute(f"""
+                SELECT {USER_SELECT_FIELDS}
                 FROM users
                 WHERE LOWER(email) = %s
             """, (email,))
             user = cur.fetchone()
 
             if user:
-                return user
+                return build_user_response(user)
 
-            cur.execute("""
+            cur.execute(f"""
                 INSERT INTO users (name, email, college, branch, semester, section, default_target)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, name, email, college, branch, semester, section, default_target
+                RETURNING {USER_SELECT_FIELDS}
             """, (
                 name,
                 email,
@@ -1102,7 +1460,7 @@ def auth_google_user(
             conn.commit()
 
             logger.info("New user created: %s", email)
-            return new_user
+            return build_user_response(new_user)
 
     except HTTPException:
         raise
@@ -1117,9 +1475,11 @@ def auth_google_user(
 def get_user(user_id: int, _: None = Depends(require_service_secret)):
     conn = get_conn()
     try:
+        ensure_subscription_columns(conn)
+
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, name, email, college, branch, semester, section, default_target
+            cur.execute(f"""
+                SELECT {USER_SELECT_FIELDS}
                 FROM users
                 WHERE id = %s
             """, (user_id,))
@@ -1128,13 +1488,335 @@ def get_user(user_id: int, _: None = Depends(require_service_secret)):
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
 
-            return user
+            return build_user_response(user)
 
     except HTTPException:
         raise
     except Exception:
         logger.exception("Failed to get user %s", user_id)
         raise HTTPException(status_code=500, detail="Failed to fetch user")
+    finally:
+        conn.close()
+
+
+@app.get("/users/{user_id}/subscription")
+def get_user_subscription(user_id: int, _: None = Depends(require_service_secret)):
+    conn = get_conn()
+    try:
+        ensure_subscription_columns(conn)
+
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT {USER_SELECT_FIELDS}
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            user = cur.fetchone()
+
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+        return {
+            "current": build_subscription_response(user),
+            "plans": SUBSCRIPTION_PLANS,
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to fetch subscription for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Failed to fetch subscription")
+    finally:
+        conn.close()
+
+
+@app.post("/users/{user_id}/subscription/create-order")
+@app.post("/users/{user_id}/subscription/checkout")
+def create_subscription_order(
+    user_id: int,
+    payload: SubscriptionCheckoutPayload,
+    _: None = Depends(require_service_secret),
+):
+    conn = get_conn()
+    try:
+        plan = get_subscription_plan(payload.plan_id)
+        amount_paise = int(plan["price_rupees"]) * 100
+
+        if amount_paise < 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Minimum order amount is 100 paise",
+            )
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, email, name
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            user = cur.fetchone()
+
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+        if not razorpay_client:
+            raise HTTPException(
+                status_code=500,
+                detail="Razorpay is not configured on the server."
+            )
+
+        order_data = {
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": build_order_receipt(user_id),
+            "notes": {
+                "user_id": str(user_id),
+                "plan_id": payload.plan_id,
+                "student_email": clean_text(user.get("email")),
+            },
+        }
+
+        try:
+            order = razorpay_client.order.create(data=order_data)
+        except (
+            razorpay.errors.BadRequestError,
+            razorpay.errors.GatewayError,
+            razorpay.errors.ServerError,
+        ) as exc:
+            raise razorpay_error_response(exc, "Failed to create Razorpay order")
+
+        return {
+            "provider": "razorpay",
+            "plan": plan,
+            "order_id": order.get("id"),
+            "amount": order.get("amount", amount_paise),
+            "currency": order.get("currency", "INR"),
+            "amount_rupees": plan["price_rupees"],
+            "message": "Order is ready.",
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to create checkout for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Failed to create checkout")
+    finally:
+        conn.close()
+
+
+@app.post("/users/{user_id}/subscription/verify-payment")
+def verify_subscription_payment(
+    user_id: int,
+    payload: SubscriptionPaymentVerificationPayload,
+    _: None = Depends(require_service_secret),
+):
+    payment_id = clean_text(payload.razorpay_payment_id)
+    order_id = clean_text(payload.razorpay_order_id)
+    signature = clean_text(payload.razorpay_signature)
+
+    if not payment_id or not order_id or not signature:
+        raise HTTPException(status_code=400, detail="Missing payment verification fields")
+
+    if not razorpay_client:
+        raise HTTPException(
+            status_code=500,
+            detail="Razorpay is not configured on the server.",
+        )
+
+    if not verify_razorpay_signature(
+        order_id=order_id,
+        payment_id=payment_id,
+        signature=signature,
+    ):
+        raise HTTPException(status_code=400, detail="Payment signature mismatch")
+
+    try:
+        order = razorpay_client.order.fetch(order_id)
+    except (
+        razorpay.errors.BadRequestError,
+        razorpay.errors.GatewayError,
+        razorpay.errors.ServerError,
+    ) as exc:
+        raise razorpay_error_response(exc, "Failed to verify Razorpay order")
+
+    notes = order.get("notes") or {}
+    order_user_id = clean_text(notes.get("user_id"))
+    plan_id = clean_text(notes.get("plan_id"))
+
+    if order_user_id != str(user_id):
+        raise HTTPException(status_code=400, detail="Payment does not belong to this user")
+
+    plan = get_subscription_plan(plan_id)
+    amount_paise = int(plan["price_rupees"]) * 100
+
+    if int(order.get("amount") or 0) != amount_paise:
+        raise HTTPException(status_code=400, detail="Payment amount mismatch")
+
+    if clean_text(order.get("currency")).upper() != "INR":
+        raise HTTPException(status_code=400, detail="Payment currency mismatch")
+
+    conn = get_conn()
+    try:
+        ensure_subscription_columns(conn)
+
+        with conn.cursor() as cur:
+            renews_at = datetime.now(ZoneInfo("UTC")) + PLAN_DURATIONS.get(
+                plan_id,
+                timedelta(days=92),
+            )
+            cur.execute(f"""
+                UPDATE users
+                SET subscription_plan = %s,
+                    subscription_status = 'active',
+                    subscription_started_at = COALESCE(subscription_started_at, NOW()),
+                    subscription_renews_at = %s,
+                    subscription_provider = 'razorpay',
+                    subscription_reference = %s
+                WHERE id = %s
+                RETURNING {USER_SELECT_FIELDS}
+            """, (plan_id, renews_at, payment_id, user_id))
+            user = cur.fetchone()
+
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            conn.commit()
+
+        return {
+            "message": "Payment verified successfully.",
+            "current": build_subscription_response(user),
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to activate subscription for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Failed to activate subscription")
+    finally:
+        conn.close()
+
+
+@app.post("/webhooks/razorpay")
+async def razorpay_webhook(request: Request):
+    payload = await request.body()
+    signature = request.headers.get("x-razorpay-signature")
+    webhook_secret = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+
+    if not signature or not webhook_secret:
+        raise HTTPException(status_code=400, detail="Missing signature or secret")
+
+    # Verify signature
+    expected_sig = hmac.new(
+        bytes(webhook_secret, "latin-1"),
+        msg=payload,
+        digestmod=hashlib.sha256
+    ).hexdigest()
+
+    if not compare_digest(expected_sig, signature):
+        logger.error("Invalid Razorpay webhook signature")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    try:
+        data = await request.json()
+        event = data.get("event")
+
+        if event in ["payment_link.paid", "order.paid"]:
+            entity = data.get("payload", {}).get("payment_link", {}).get("entity", {})
+            if event == "order.paid":
+                entity = data.get("payload", {}).get("order", {}).get("entity", {})
+            
+            notes = entity.get("notes", {})
+            user_id_str = notes.get("user_id")
+            plan_id = notes.get("plan_id")
+            reference = entity.get("id")
+
+            if not user_id_str or not plan_id:
+                return {"status": "ok", "message": "Ignored - no user_id or plan_id"}
+
+            user_id = int(user_id_str)
+
+            # Update database
+            conn = get_conn()
+            try:
+                ensure_subscription_columns(conn)
+
+                with conn.cursor() as cur:
+                    renews_at = datetime.now(ZoneInfo("UTC")) + PLAN_DURATIONS.get(plan_id, timedelta(days=92))
+                    cur.execute("""
+                        UPDATE users
+                        SET subscription_plan = %s,
+                            subscription_status = 'active',
+                            subscription_started_at = COALESCE(subscription_started_at, NOW()),
+                            subscription_renews_at = %s,
+                            subscription_provider = 'razorpay',
+                            subscription_reference = %s
+                        WHERE id = %s
+                    """, (plan_id, renews_at, reference, user_id))
+                    conn.commit()
+                    logger.info("Activated subscription for user %s, plan %s", user_id, plan_id)
+            finally:
+                conn.close()
+
+        return {"status": "ok"}
+    except Exception:
+        logger.exception("Error processing webhook")
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
+
+
+
+@app.post("/admin/users/{user_id}/subscription")
+def admin_update_subscription(
+    user_id: int,
+    payload: SubscriptionUpdatePayload,
+    _: None = Depends(require_admin_secret),
+):
+    conn = get_conn()
+    try:
+        ensure_subscription_columns(conn)
+
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                UPDATE users
+                SET subscription_plan = %s,
+                    subscription_status = %s,
+                    subscription_started_at = CASE
+                        WHEN %s = 'free' THEN NULL
+                        WHEN %s = 'active' THEN COALESCE(subscription_started_at, NOW())
+                        ELSE subscription_started_at
+                    END,
+                    subscription_renews_at = %s,
+                    subscription_provider = %s,
+                    subscription_reference = %s
+                WHERE id = %s
+                RETURNING {USER_SELECT_FIELDS}
+            """, (
+                payload.plan_id,
+                payload.status,
+                payload.plan_id,
+                payload.status,
+                payload.renews_at,
+                payload.provider.strip(),
+                payload.reference.strip(),
+                user_id,
+            ))
+
+            user = cur.fetchone()
+
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            conn.commit()
+
+        return {
+            "message": "Subscription updated successfully.",
+            "current": build_subscription_response(user),
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to update subscription for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Failed to update subscription")
     finally:
         conn.close()
 

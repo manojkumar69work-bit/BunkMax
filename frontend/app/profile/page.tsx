@@ -178,6 +178,8 @@ export default function ProfilePage() {
           </div>
         </div>
 
+
+
         <PushNotificationSettings userId={appUser.id} />
 
         <div className="space-y-3">

@@ -1,6 +1,23 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  webpack(config, { dev }) {
+    if (dev) {
+      config.watchOptions = {
+        ...config.watchOptions,
+        ignored: [
+          "**/.next/**",
+          "**/node_modules/**",
+          "**/venv/**",
+          "**/source/**",
+          "**/__pycache__/**",
+        ],
+      };
+    }
+
+    return config;
+  },
+
   async headers() {
     return [
       {

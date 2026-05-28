@@ -6,6 +6,8 @@ const API_BASE =
 
 const SERVICE_SECRET = process.env.BACKEND_API_SECRET || "";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const session = await auth();
 

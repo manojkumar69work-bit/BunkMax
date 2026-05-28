@@ -7,7 +7,7 @@ export function useProGuard(appUser: { is_pro?: boolean } | null | undefined) {
 
   function checkPro() {
     if (!appUser?.is_pro) {
-      router.push("/upgrade");
+      router.refresh();
       return false;
     }
     return true;

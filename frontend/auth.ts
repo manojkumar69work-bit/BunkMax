@@ -17,14 +17,17 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   },
   callbacks: {
     async signIn({ profile }) {
-      const email = profile?.email;
+      const email =
+        typeof profile?.email === "string"
+          ? profile.email.trim().toLowerCase()
+          : "";
       const emailVerified = profile?.email_verified;
       const hostedDomain = (profile as { hd?: string } | undefined)?.hd;
 
-      return !!email &&
+      return email.length > 0 &&
         emailVerified === true &&
         email.endsWith("@mlrit.ac.in") &&
-        hostedDomain === "mlrit.ac.in";
+        (!hostedDomain || hostedDomain === "mlrit.ac.in");
     },
 
     async jwt({ token, profile }) {

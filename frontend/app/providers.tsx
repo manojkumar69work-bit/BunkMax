@@ -1,7 +1,7 @@
 "use client";
 
 import { SessionProvider } from "next-auth/react";
-import PushNotificationRegistrar from "@/components/PushNotificationRegistrar";
+import SubscriptionGate from "@/components/SubscriptionGate";
 
 export default function Providers({
   children,
@@ -10,8 +10,7 @@ export default function Providers({
 }) {
   return (
     <SessionProvider>
-      <PushNotificationRegistrar />
-      {children}
+      <SubscriptionGate>{children}</SubscriptionGate>
     </SessionProvider>
   );
 }

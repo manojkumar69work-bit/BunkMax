@@ -8,6 +8,5 @@ export const config = {
     "/schedule/:path*",
     "/plan/:path*",
     "/profile/:path*",
-    "/login",
   ],
 };

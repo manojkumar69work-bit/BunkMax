@@ -11,6 +11,10 @@ export type AppUserResponse = {
   semester: string;
   section: string;
   default_target: number;
+  is_pro: boolean;
+  subscription_plan: string;
+  subscription_status: string;
+  subscription_renews_at?: string | null;
 };
 
 export type DashboardResponse = {
@@ -73,6 +77,45 @@ export type ScheduleEntry = {
   subject_name: string;
 };
 
+export type SubscriptionPlan = {
+  id: "free" | "pro_monthly" | "pro_yearly";
+  name: string;
+  price_rupees: number;
+  billing_interval: string;
+  description: string;
+  features: string[];
+  highlighted: boolean;
+};
+
+export type CurrentSubscription = {
+  plan_id: string;
+  plan_name: string;
+  status: string;
+  is_pro: boolean;
+  renews_at?: string | null;
+  provider: string;
+};
+
+export type SubscriptionResponse = {
+  current: CurrentSubscription;
+  plans: SubscriptionPlan[];
+};
+
+export type SubscriptionOrderResponse = {
+  provider: string;
+  plan: SubscriptionPlan;
+  order_id: string;
+  amount: number;
+  currency: string;
+  amount_rupees: number;
+  message: string;
+};
+
+export type SubscriptionPaymentVerificationResponse = {
+  message: string;
+  current: CurrentSubscription;
+};
+
 function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -112,6 +155,7 @@ async function fetchWithTimeout(
 
   try {
     return await fetch(url, {
+      credentials: "include",
       ...options,
       signal: controller.signal,
     });
@@ -259,6 +303,47 @@ export async function clearAllUserData(userId: number) {
   });
 
   return handleResponse<{ message: string }>(res);
+}
+
+export async function getSubscription(userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subscription`);
+  return handleResponse<SubscriptionResponse>(res);
+}
+
+export async function createSubscriptionOrder(
+  payload: { plan_id: "pro_monthly" | "pro_yearly" },
+  userId: number
+) {
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/subscription/create-order`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  return handleResponse<SubscriptionOrderResponse>(res);
+}
+
+export async function verifySubscriptionPayment(
+  payload: {
+    razorpay_payment_id: string;
+    razorpay_order_id: string;
+    razorpay_signature: string;
+  },
+  userId: number
+) {
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/subscription/verify-payment`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  return handleResponse<SubscriptionPaymentVerificationResponse>(res);
 }
 
 /* ---------------- DASHBOARD / HOME ---------------- */

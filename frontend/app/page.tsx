@@ -81,6 +81,10 @@ export default function Home() {
 
   useEffect(() => {
     if (!appUser?.id) return;
+    if (!appUser.is_pro) {
+      setTimetable({});
+      return;
+    }
 
     const userId = appUser.id;
 
@@ -108,14 +112,21 @@ export default function Home() {
     }
 
     loadSchedule();
-  }, [appUser?.id]);
+  }, [appUser?.id, appUser?.is_pro]);
 
   useEffect(() => {
     if (!appUser?.id) return;
+    if (!appUser.is_pro) {
+      setLoading(false);
+      setError("");
+      setData(null);
+      setSubjects([]);
+      return;
+    }
 
     const userId = appUser.id;
     loadDashboard(userId);
-  }, [appUser?.id]);
+  }, [appUser?.id, appUser?.is_pro]);
 
   async function loadDashboard(userId: number) {
     try {
@@ -137,7 +148,7 @@ export default function Home() {
   }
 
   async function runTomorrow() {
-    if (!appUser?.id || busy) return;
+    if (!appUser?.id || !appUser.is_pro || busy) return;
 
     const userId = appUser.id;
 
@@ -167,7 +178,7 @@ export default function Home() {
   }
 
   async function runBest() {
-    if (!appUser?.id || busy) return;
+    if (!appUser?.id || !appUser.is_pro || busy) return;
 
     const userId = appUser.id;
 
@@ -186,7 +197,7 @@ export default function Home() {
   }
 
   async function runWorst() {
-    if (!appUser?.id || busy) return;
+    if (!appUser?.id || !appUser.is_pro || busy) return;
 
     const userId = appUser.id;
 
@@ -246,13 +257,16 @@ export default function Home() {
           </p>
         </div>
 
-        <Link
-          href="/about"
-          className="icon-button"
-          aria-label="About BunkMax"
-        >
-          <Info size={18} aria-hidden="true" />
-        </Link>
+        <div className="flex gap-2">
+
+          <Link
+            href="/about"
+            className="icon-button"
+            aria-label="About BunkMax"
+          >
+            <Info size={18} aria-hidden="true" />
+          </Link>
+        </div>
       </div>
 
       {error && (
