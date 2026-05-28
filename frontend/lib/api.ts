@@ -148,7 +148,7 @@ const pendingRequests = new Map<string, Promise<unknown>>();
 async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeoutMs: number = 10000
+  timeoutMs: number = 30000
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -161,7 +161,7 @@ async function fetchWithTimeout(
     });
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("Request timeout - server took too long to respond");
+      throw new Error("Server is waking up. Please try again in a few seconds.");
     }
     throw error;
   } finally {
@@ -173,13 +173,14 @@ async function fetchWithTimeout(
 async function fetchWithRetry(
   url: string,
   options: RequestInit = {},
-  maxRetries: number = 2
+  maxRetries: number = 2,
+  timeoutMs: number = 30000
 ): Promise<Response> {
   let lastError: unknown = new Error("Request failed");
 
   for (let i = 0; i <= maxRetries; i++) {
     try {
-      return await fetchWithTimeout(url, options);
+      return await fetchWithTimeout(url, options, timeoutMs);
     } catch (error: unknown) {
       lastError = error;
       const message = errorMessage(error);
@@ -306,7 +307,12 @@ export async function clearAllUserData(userId: number) {
 }
 
 export async function getSubscription(userId: number) {
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subscription`);
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/subscription`,
+    {},
+    1,
+    60000
+  );
   return handleResponse<SubscriptionResponse>(res);
 }
 
@@ -320,7 +326,9 @@ export async function createSubscriptionOrder(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    }
+    },
+    1,
+    60000
   );
 
   return handleResponse<SubscriptionOrderResponse>(res);
@@ -340,7 +348,9 @@ export async function verifySubscriptionPayment(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    }
+    },
+    1,
+    60000
   );
 
   return handleResponse<SubscriptionPaymentVerificationResponse>(res);
