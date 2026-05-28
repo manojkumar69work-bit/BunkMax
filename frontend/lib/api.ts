@@ -229,10 +229,10 @@ async function handleResponse<T>(res: Response): Promise<T> {
         ? detail
         : typeof messageValue === "string"
         ? messageValue
-        : typeof errorValue === "string"
-        ? errorValue
         : typeof detailsValue === "string"
         ? detailsValue
+        : typeof errorValue === "string"
+        ? errorValue
         : Array.isArray(detail)
         ? JSON.stringify(detail)
         : res.status === 404
