@@ -280,7 +280,7 @@ SUBSCRIPTION_PLANS = [
     {
         "id": "pro_monthly",
         "name": "3 Month Plan",
-        "price_rupees": 49,
+        "price_rupees": 59,
         "billing_interval": "3 months",
         "description": "Affordable access for a full mid-semester stretch.",
         "features": [
@@ -289,7 +289,7 @@ SUBSCRIPTION_PLANS = [
             "Priority notification features",
             "Early access to student tools",
         ],
-        "highlighted": True,
+        "highlighted": False,
     },
     {
         "id": "pro_yearly",
@@ -303,7 +303,7 @@ SUBSCRIPTION_PLANS = [
             "Semester-long planning support",
             "Priority feature requests",
         ],
-        "highlighted": False,
+        "highlighted": True,
     },
 ]
 
