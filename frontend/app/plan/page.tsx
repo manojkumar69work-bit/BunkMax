@@ -61,6 +61,14 @@ function formatDateDisplay(dateStr: string): string {
   });
 }
 
+function isPastDateString(dateStr: string): boolean {
+  const date = new Date(`${dateStr}T00:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return date < today;
+}
+
 export default function PlanPage() {
   const { appUser, loadingUser } = useAppUser();
 
@@ -81,6 +89,16 @@ export default function PlanPage() {
   const [error, setError] = useState("");
 
   function previousMonth() {
+    const today = new Date();
+    const currentStart = new Date(
+      currentMonth.getFullYear(),
+      currentMonth.getMonth(),
+      1
+    );
+    const todayStart = new Date(today.getFullYear(), today.getMonth(), 1);
+
+    if (currentStart <= todayStart) return;
+
     setCurrentMonth(
       new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1)
     );
@@ -102,6 +120,8 @@ export default function PlanPage() {
       currentMonth.getMonth(),
       currentMonth.getFullYear()
     );
+
+    if (isPastDateString(dateStr)) return;
 
     const dateObj = new Date(`${dateStr}T00:00:00`);
     setSelectedDateForModal(dateObj);
@@ -207,6 +227,10 @@ export default function PlanPage() {
   }
 
   const calendarDays = generateCalendarDays(currentMonth);
+  const today = new Date();
+  const canGoPrevious =
+    new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1) >
+    new Date(today.getFullYear(), today.getMonth(), 1);
 
   const monthName = currentMonth.toLocaleDateString("en-US", {
     month: "long",
@@ -232,7 +256,8 @@ export default function PlanPage() {
         <button
           type="button"
           onClick={previousMonth}
-          className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 text-gray-300 hover:bg-white/10 transition"
+          disabled={!canGoPrevious}
+          className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 text-gray-300 hover:bg-white/10 transition disabled:opacity-40 disabled:hover:bg-white/5"
         >
           ←
         </button>
@@ -272,6 +297,7 @@ export default function PlanPage() {
 
             const isSelected = selectedDates.has(dateStr);
             const status = selectedDates.get(dateStr);
+            const isPast = isPastDateString(dateStr);
 
             const today = new Date();
             const isToday =
@@ -284,11 +310,14 @@ export default function PlanPage() {
                 key={dateStr}
                 type="button"
                 onClick={() => handleDateClick(day)}
+                disabled={isPast}
                 className={`aspect-square rounded-lg border transition flex flex-col items-center justify-center text-sm ${
                   isSelected
                     ? status === "present"
                       ? "border-green-500/50 bg-green-500/15 text-green-200"
                       : "border-red-500/50 bg-red-500/15 text-red-200"
+                    : isPast
+                    ? "border-white/5 bg-white/[0.02] text-gray-600 cursor-not-allowed"
                     : "border-white/10 bg-white/5 text-white hover:bg-white/10"
                 } ${isToday ? "ring-2 ring-blue-500/50" : ""}`}
               >

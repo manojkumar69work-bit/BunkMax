@@ -1,2 +1,12 @@
 .streamlit/secrets.toml
 .env
+__pycache__/
+*.py[cod]
+.DS_Store
+*.db
+*.db-*
+*.sqlite
+*.sqlite*
+uploads/
+venv/
+source/

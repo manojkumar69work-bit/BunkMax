@@ -6,10 +6,16 @@ export function useProGuard(appUser: { is_pro?: boolean } | null | undefined) {
   const router = useRouter();
 
   function checkPro() {
-    if (!appUser?.is_pro) {
-      router.refresh();
+    if (!appUser) {
+      router.push("/login");
       return false;
     }
+
+    if (!appUser.is_pro) {
+      router.push("/");
+      return false;
+    }
+
     return true;
   }
 

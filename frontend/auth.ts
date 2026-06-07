@@ -16,6 +16,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     signIn: "/login",
   },
   callbacks: {
+    authorized({ auth }) {
+      return !!auth?.user;
+    },
+
     async signIn({ profile }) {
       const email =
         typeof profile?.email === "string"

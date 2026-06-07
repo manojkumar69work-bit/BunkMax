@@ -1,0 +1,15 @@
+.DS_Store
+.env*
+!.env.example
+*.db
+*.db-*
+*.sqlite
+*.sqlite*
+*.zip
+venv/
+uploads/
+backend/venv/
+backend/uploads/
+backend/source/
+frontend/venv/
+frontend/source/

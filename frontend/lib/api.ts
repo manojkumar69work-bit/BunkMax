@@ -78,7 +78,7 @@ export type ScheduleEntry = {
 };
 
 export type SubscriptionPlan = {
-  id: "free" | "pro_monthly" | "pro_yearly";
+  id: "free" | "pro_3mo" | "pro_6mo" | "pro_monthly" | "pro_yearly";
   name: string;
   price_rupees: number;
   billing_interval: string;
@@ -120,8 +120,11 @@ function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+class RequestTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RequestTimeoutError";
+  }
 }
 
 function stringFromUnknown(value: unknown): string | null {
@@ -161,7 +164,9 @@ async function fetchWithTimeout(
     });
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("Server is waking up. Please try again in a few seconds.");
+      throw new RequestTimeoutError(
+        "Server is waking up. Please try again in a few seconds."
+      );
     }
     throw error;
   } finally {
@@ -180,24 +185,32 @@ async function fetchWithRetry(
 
   for (let i = 0; i <= maxRetries; i++) {
     try {
-      return await fetchWithTimeout(url, options, timeoutMs);
+      const response = await fetchWithTimeout(url, options, timeoutMs);
+
+      if (response.status >= 400 && response.status < 500) {
+        return response;
+      }
+
+      if (response.status < 500 || i === maxRetries) {
+        return response;
+      }
     } catch (error: unknown) {
       lastError = error;
-      const message = errorMessage(error);
 
-      // Don't retry on client errors (4xx) or timeout errors
-      if (
-        message.includes("timeout") ||
-        message.includes("4")
-      ) {
+      if (error instanceof RequestTimeoutError) {
         throw error;
       }
 
-      // Wait before retrying (exponential backoff)
       if (i < maxRetries) {
-        const delay = Math.pow(2, i) * 1000; // 1s, 2s, 4s
+        const delay = Math.pow(2, i) * 1000;
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
+      continue;
+    }
+
+    if (i < maxRetries) {
+      const delay = Math.pow(2, i) * 1000;
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 
@@ -317,7 +330,7 @@ export async function getSubscription(userId: number) {
 }
 
 export async function createSubscriptionOrder(
-  payload: { plan_id: "pro_monthly" | "pro_yearly" },
+  payload: { plan_id: "pro_3mo" | "pro_6mo" | "pro_monthly" | "pro_yearly" },
   userId: number
 ) {
   const res = await fetchWithRetry(

@@ -145,6 +145,7 @@ def send_push_notification(
             "success_count": 0,
             "failure_count": 0,
             "token_count": 0,
+            "success_tokens": [],
         }
 
     _initialize_firebase_admin()
@@ -153,6 +154,7 @@ def send_push_notification(
     success_count = 0
     failure_count = 0
     invalid_tokens: list[str] = []
+    success_tokens: list[str] = []
 
     for token_chunk in _chunked(tokens, MAX_MULTICAST_TOKENS):
         webpush = messaging.WebpushConfig(
@@ -180,9 +182,9 @@ def send_push_notification(
         failure_count += response.failure_count
 
         for token, send_response in zip(token_chunk, response.responses):
-            if not send_response.success and _is_invalid_token_error(
-                send_response.exception
-            ):
+            if send_response.success:
+                success_tokens.append(token)
+            elif _is_invalid_token_error(send_response.exception):
                 invalid_tokens.append(token)
 
     _delete_tokens(invalid_tokens)
@@ -191,6 +193,7 @@ def send_push_notification(
         "success_count": success_count,
         "failure_count": failure_count,
         "token_count": len(tokens),
+        "success_tokens": success_tokens,
     }
 
 
@@ -212,6 +215,7 @@ def send_push_to_tokens(
             "success_count": 0,
             "failure_count": 0,
             "token_count": 0,
+            "success_tokens": [],
         }
 
     if not clean_title:
@@ -226,6 +230,7 @@ def send_push_to_tokens(
     success_count = 0
     failure_count = 0
     invalid_tokens: list[str] = []
+    success_tokens: list[str] = []
 
     for token_chunk in _chunked(clean_tokens, MAX_MULTICAST_TOKENS):
         webpush = messaging.WebpushConfig(
@@ -253,9 +258,9 @@ def send_push_to_tokens(
         failure_count += response.failure_count
 
         for token, send_response in zip(token_chunk, response.responses):
-            if not send_response.success and _is_invalid_token_error(
-                send_response.exception
-            ):
+            if send_response.success:
+                success_tokens.append(token)
+            elif _is_invalid_token_error(send_response.exception):
                 invalid_tokens.append(token)
 
     _delete_tokens(invalid_tokens)
@@ -264,4 +269,5 @@ def send_push_to_tokens(
         "success_count": success_count,
         "failure_count": failure_count,
         "token_count": len(clean_tokens),
+        "success_tokens": success_tokens,
     }

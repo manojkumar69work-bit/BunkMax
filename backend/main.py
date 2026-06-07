@@ -36,13 +36,22 @@ def health_check():
 
 
 def get_allowed_origins() -> list[str]:
-    default_origins = [
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "https://bunk-max.vercel.app",
-    ]
+    app_env = os.getenv("APP_ENV", "").strip().lower()
+    allow_dev_origins = os.getenv("ALLOW_DEV_ORIGINS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    default_origins = ["https://bunk-max.vercel.app"]
+
+    if app_env in {"development", "dev", "local", "test"} or allow_dev_origins:
+        default_origins.extend([
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+        ])
 
     env_origins = os.getenv("ALLOWED_ORIGINS", "")
     frontend_url = os.getenv("FRONTEND_URL", "")
@@ -229,7 +238,7 @@ class CalendarPlanPayload(BaseModel):
 
 
 class SubscriptionCheckoutPayload(BaseModel):
-    plan_id: Literal["pro_monthly", "pro_yearly"]
+    plan_id: Literal["pro_3mo", "pro_6mo", "pro_monthly", "pro_yearly"]
 
 
 class SubscriptionPaymentVerificationPayload(BaseModel):
@@ -239,7 +248,7 @@ class SubscriptionPaymentVerificationPayload(BaseModel):
 
 
 class SubscriptionUpdatePayload(BaseModel):
-    plan_id: Literal["free", "pro_monthly", "pro_yearly"] = "free"
+    plan_id: Literal["free", "pro_3mo", "pro_6mo", "pro_monthly", "pro_yearly"] = "free"
     status: Literal["free", "active", "cancelled", "past_due", "expired"] = "free"
     renews_at: Optional[datetime] = None
     provider: str = Field(default="", max_length=80)
@@ -247,6 +256,8 @@ class SubscriptionUpdatePayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_subscription_update(self):
+        self.plan_id = normalize_plan_id(self.plan_id)  # type: ignore[assignment]
+
         if self.plan_id == "free":
             self.status = "free"
             self.renews_at = None
@@ -278,11 +289,11 @@ FREE_SUBSCRIPTION_PLAN = {
 
 SUBSCRIPTION_PLANS = [
     {
-        "id": "pro_monthly",
-        "name": "3 Month Plan",
+        "id": "pro_3mo",
+        "name": "Mid Plan",
         "price_rupees": 59,
         "billing_interval": "3 months",
-        "description": "Affordable access for a full mid-semester stretch.",
+        "description": "3 months of BunkMax access.",
         "features": [
             "Calendar-based bunk planning",
             "Smarter recovery targets",
@@ -292,13 +303,13 @@ SUBSCRIPTION_PLANS = [
         "highlighted": False,
     },
     {
-        "id": "pro_yearly",
+        "id": "pro_6mo",
         "name": "Semester Plan",
         "price_rupees": 89,
         "billing_interval": "6 months",
         "description": "Best value for one complete semester.",
         "features": [
-            "Everything in the 3 Month Plan",
+            "Everything in the Mid Plan",
             "Lower semester price",
             "Semester-long planning support",
             "Priority feature requests",
@@ -307,9 +318,14 @@ SUBSCRIPTION_PLANS = [
     },
 ]
 
+LEGACY_PLAN_ALIASES = {
+    "pro_monthly": "pro_3mo",
+    "pro_yearly": "pro_6mo",
+}
+
 PLAN_DURATIONS = {
-    "pro_monthly": timedelta(days=92),
-    "pro_yearly": timedelta(days=183),
+    "pro_3mo": timedelta(days=92),
+    "pro_6mo": timedelta(days=183),
 }
 
 USER_SELECT_FIELDS = """
@@ -360,9 +376,19 @@ def ensure_subscription_columns(conn) -> None:
         """,
         """
             UPDATE users
+            SET subscription_plan = 'pro_3mo'
+            WHERE subscription_plan = 'pro_monthly';
+        """,
+        """
+            UPDATE users
+            SET subscription_plan = 'pro_6mo'
+            WHERE subscription_plan = 'pro_yearly';
+        """,
+        """
+            UPDATE users
             SET subscription_plan = 'free'
             WHERE subscription_plan IS NULL
-               OR subscription_plan NOT IN ('free', 'pro_monthly', 'pro_yearly');
+               OR subscription_plan NOT IN ('free', 'pro_3mo', 'pro_6mo');
         """,
         """
             UPDATE users
@@ -405,7 +431,14 @@ def clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def normalize_plan_id(plan_id: Any) -> str:
+    clean_plan_id = clean_text(plan_id) or "free"
+    return LEGACY_PLAN_ALIASES.get(clean_plan_id, clean_plan_id)
+
+
 def get_subscription_plan(plan_id: str) -> dict[str, Any]:
+    plan_id = normalize_plan_id(plan_id)
+
     if plan_id == "free":
         return FREE_SUBSCRIPTION_PLAN
 
@@ -417,15 +450,33 @@ def get_subscription_plan(plan_id: str) -> dict[str, Any]:
 
 
 def subscription_payment_link(plan_id: str) -> str:
+    plan_id = normalize_plan_id(plan_id)
     plan_key = plan_id.upper()
+    legacy_plan_key = next(
+        (
+            legacy_id.upper()
+            for legacy_id, canonical_id in LEGACY_PLAN_ALIASES.items()
+            if canonical_id == plan_id
+        ),
+        "",
+    )
+
     return (
         os.getenv(f"SUBSCRIPTION_{plan_key}_URL", "").strip()
         or os.getenv(f"RAZORPAY_{plan_key}_LINK", "").strip()
+        or (
+            os.getenv(f"SUBSCRIPTION_{legacy_plan_key}_URL", "").strip()
+            if legacy_plan_key else ""
+        )
+        or (
+            os.getenv(f"RAZORPAY_{legacy_plan_key}_LINK", "").strip()
+            if legacy_plan_key else ""
+        )
     )
 
 
 def is_subscription_active(row: dict[str, Any]) -> bool:
-    plan_id = clean_text(row.get("subscription_plan")) or "free"
+    plan_id = normalize_plan_id(row.get("subscription_plan"))
     status = clean_text(row.get("subscription_status")) or "free"
     renews_at = row.get("subscription_renews_at")
 
@@ -448,7 +499,7 @@ def is_subscription_active(row: dict[str, Any]) -> bool:
 
 def build_user_response(row: dict[str, Any]) -> dict[str, Any]:
     user = dict(row)
-    plan_id = clean_text(user.get("subscription_plan")) or "free"
+    plan_id = normalize_plan_id(user.get("subscription_plan"))
     status = clean_text(user.get("subscription_status")) or "free"
 
     user["subscription_plan"] = plan_id
@@ -507,6 +558,51 @@ def verify_razorpay_signature(
     ).hexdigest()
 
     return compare_digest(expected_signature, signature)
+
+
+def expected_plan_amount_paise(plan: dict[str, Any]) -> int:
+    return int(plan["price_rupees"]) * 100
+
+
+def validate_razorpay_money(
+    entity: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    amount_field: str = "amount",
+) -> None:
+    amount_paise = expected_plan_amount_paise(plan)
+
+    if int(entity.get(amount_field) or 0) != amount_paise:
+        raise HTTPException(status_code=400, detail="Payment amount mismatch")
+
+    if clean_text(entity.get("currency")).upper() != "INR":
+        raise HTTPException(status_code=400, detail="Payment currency mismatch")
+
+
+def validate_captured_razorpay_payment(
+    payment_id: str,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    if not razorpay_client:
+        raise HTTPException(
+            status_code=500,
+            detail="Razorpay is not configured on the server.",
+        )
+
+    try:
+        payment = razorpay_client.payment.fetch(payment_id)
+    except (
+        razorpay.errors.BadRequestError,
+        razorpay.errors.GatewayError,
+        razorpay.errors.ServerError,
+    ) as exc:
+        raise razorpay_error_response(exc, "Failed to verify Razorpay payment")
+
+    if clean_text(payment.get("status")).lower() != "captured":
+        raise HTTPException(status_code=400, detail="Payment is not captured")
+
+    validate_razorpay_money(payment, plan)
+    return payment
 
 
 def calc_overall(subjects: list[dict[str, Any]]) -> float:
@@ -807,11 +903,13 @@ def send_class_count_notification_batch(
             {
                 "tokens": [],
                 "user_ids": set(),
+                "token_user_ids": {},
             },
         )
 
         group["tokens"].append(token)
         group["user_ids"].add(user_id)
+        group["token_user_ids"][token] = user_id
 
     token_count = 0
     success_count = 0
@@ -831,8 +929,20 @@ def send_class_count_notification_batch(
         token_count += int(result.get("token_count") or 0)
         success_count += int(result.get("success_count") or 0)
         failure_count += int(result.get("failure_count") or 0)
-        logged_user_ids.update(group["user_ids"])
-        mark_notifications_sent(group["user_ids"], notification_type, sent_date)
+
+        success_tokens = {
+            clean_text(token)
+            for token in result.get("success_tokens", [])
+            if clean_text(token)
+        }
+        successful_user_ids = {
+            group["token_user_ids"][token]
+            for token in success_tokens
+            if token in group["token_user_ids"]
+        }
+
+        logged_user_ids.update(successful_user_ids)
+        mark_notifications_sent(successful_user_ids, notification_type, sent_date)
 
     return {
         "message": "Notifications processed.",
@@ -1086,9 +1196,21 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
 
             cur.execute("""
                 UPDATE users
+                SET subscription_plan = 'pro_3mo'
+                WHERE subscription_plan = 'pro_monthly';
+            """)
+
+            cur.execute("""
+                UPDATE users
+                SET subscription_plan = 'pro_6mo'
+                WHERE subscription_plan = 'pro_yearly';
+            """)
+
+            cur.execute("""
+                UPDATE users
                 SET subscription_plan = 'free'
                 WHERE subscription_plan IS NULL
-                   OR subscription_plan NOT IN ('free', 'pro_monthly', 'pro_yearly');
+                   OR subscription_plan NOT IN ('free', 'pro_3mo', 'pro_6mo');
             """)
 
             cur.execute("""
@@ -1429,8 +1551,6 @@ def auth_google_user(
 
     conn = get_conn()
     try:
-        ensure_subscription_columns(conn)
-
         with conn.cursor() as cur:
             cur.execute(f"""
                 SELECT {USER_SELECT_FIELDS}
@@ -1475,8 +1595,6 @@ def auth_google_user(
 def get_user(user_id: int, _: None = Depends(require_service_secret)):
     conn = get_conn()
     try:
-        ensure_subscription_columns(conn)
-
         with conn.cursor() as cur:
             cur.execute(f"""
                 SELECT {USER_SELECT_FIELDS}
@@ -1503,8 +1621,6 @@ def get_user(user_id: int, _: None = Depends(require_service_secret)):
 def get_user_subscription(user_id: int, _: None = Depends(require_service_secret)):
     conn = get_conn()
     try:
-        ensure_subscription_columns(conn)
-
         with conn.cursor() as cur:
             cur.execute(f"""
                 SELECT {USER_SELECT_FIELDS}
@@ -1539,7 +1655,8 @@ def create_subscription_order(
 ):
     conn = get_conn()
     try:
-        plan = get_subscription_plan(payload.plan_id)
+        plan_id = normalize_plan_id(payload.plan_id)
+        plan = get_subscription_plan(plan_id)
         amount_paise = int(plan["price_rupees"]) * 100
 
         if amount_paise < 100:
@@ -1571,7 +1688,7 @@ def create_subscription_order(
             "receipt": build_order_receipt(user_id),
             "notes": {
                 "user_id": str(user_id),
-                "plan_id": payload.plan_id,
+                "plan_id": plan_id,
                 "student_email": clean_text(user.get("email")),
             },
         }
@@ -1646,19 +1763,13 @@ def verify_subscription_payment(
     if order_user_id != str(user_id):
         raise HTTPException(status_code=400, detail="Payment does not belong to this user")
 
+    plan_id = normalize_plan_id(plan_id)
     plan = get_subscription_plan(plan_id)
-    amount_paise = int(plan["price_rupees"]) * 100
-
-    if int(order.get("amount") or 0) != amount_paise:
-        raise HTTPException(status_code=400, detail="Payment amount mismatch")
-
-    if clean_text(order.get("currency")).upper() != "INR":
-        raise HTTPException(status_code=400, detail="Payment currency mismatch")
+    validate_razorpay_money(order, plan)
+    payment = validate_captured_razorpay_payment(payment_id, plan)
 
     conn = get_conn()
     try:
-        ensure_subscription_columns(conn)
-
         with conn.cursor() as cur:
             renews_at = datetime.now(ZoneInfo("UTC")) + PLAN_DURATIONS.get(
                 plan_id,
@@ -1674,7 +1785,7 @@ def verify_subscription_payment(
                     subscription_reference = %s
                 WHERE id = %s
                 RETURNING {USER_SELECT_FIELDS}
-            """, (plan_id, renews_at, payment_id, user_id))
+            """, (plan_id, renews_at, clean_text(payment.get("id")) or payment_id, user_id))
             user = cur.fetchone()
 
             if not user:
@@ -1734,12 +1845,22 @@ async def razorpay_webhook(request: Request):
                 return {"status": "ok", "message": "Ignored - no user_id or plan_id"}
 
             user_id = int(user_id_str)
+            plan_id = normalize_plan_id(plan_id)
+            plan = get_subscription_plan(plan_id)
+            amount_field = "amount_paid" if entity.get("amount_paid") is not None else "amount"
+            validate_razorpay_money(entity, plan, amount_field=amount_field)
+
+            payment_entity = data.get("payload", {}).get("payment", {}).get("entity", {})
+            if payment_entity:
+                if clean_text(payment_entity.get("status")).lower() != "captured":
+                    return {"status": "ok", "message": "Ignored - payment not captured"}
+
+                validate_razorpay_money(payment_entity, plan)
+                reference = clean_text(payment_entity.get("id")) or reference
 
             # Update database
             conn = get_conn()
             try:
-                ensure_subscription_columns(conn)
-
                 with conn.cursor() as cur:
                     renews_at = datetime.now(ZoneInfo("UTC")) + PLAN_DURATIONS.get(plan_id, timedelta(days=92))
                     cur.execute("""
@@ -1772,7 +1893,7 @@ def admin_update_subscription(
 ):
     conn = get_conn()
     try:
-        ensure_subscription_columns(conn)
+        plan_id = normalize_plan_id(payload.plan_id)
 
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -1790,9 +1911,9 @@ def admin_update_subscription(
                 WHERE id = %s
                 RETURNING {USER_SELECT_FIELDS}
             """, (
-                payload.plan_id,
+                plan_id,
                 payload.status,
-                payload.plan_id,
+                plan_id,
                 payload.status,
                 payload.renews_at,
                 payload.provider.strip(),
@@ -2214,7 +2335,15 @@ def mark_attendance(
                 SELECT id
                 FROM subjects
                 WHERE user_id = %s AND LOWER(subject_name) = LOWER(%s)
-            """, (user_id, payload.subject_name.strip()))
+                ORDER BY
+                    CASE WHEN subject_name = %s THEN 0 ELSE 1 END,
+                    id
+                LIMIT 1
+            """, (
+                user_id,
+                payload.subject_name.strip(),
+                payload.subject_name.strip(),
+            ))
 
             subject = cur.fetchone()
 
@@ -2226,14 +2355,14 @@ def mark_attendance(
                     UPDATE subjects
                     SET attended_classes = attended_classes + 1,
                         total_classes = total_classes + 1
-                    WHERE user_id = %s AND LOWER(subject_name) = LOWER(%s)
-                """, (user_id, payload.subject_name.strip()))
+                    WHERE id = %s AND user_id = %s
+                """, (subject["id"], user_id))
             else:
                 cur.execute("""
                     UPDATE subjects
                     SET total_classes = total_classes + 1
-                    WHERE user_id = %s AND LOWER(subject_name) = LOWER(%s)
-                """, (user_id, payload.subject_name.strip()))
+                    WHERE id = %s AND user_id = %s
+                """, (subject["id"], user_id))
 
             conn.commit()
 
@@ -2514,6 +2643,7 @@ def calendar_plan(
     if not payload.days:
         raise HTTPException(status_code=400, detail="At least one date is required")
 
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
     subjects = load_subjects_minimal(user_id)
     timetable_rows = load_timetable_rows(user_id)
     day_map = build_day_map(timetable_rows)
@@ -2540,6 +2670,12 @@ def calendar_plan(
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid date format: {day_plan.date}",
+            )
+
+        if date_obj < today:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Past dates cannot be planned: {day_plan.date}",
             )
 
         weekday_name = date_obj.strftime("%A")
