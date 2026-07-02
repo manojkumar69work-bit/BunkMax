@@ -35,17 +35,20 @@ export type HomeSubject = {
   total_classes: number;
 };
 
-export type HomeDataResponse = {
-  dashboard: DashboardResponse;
-  subjects: HomeSubject[];
-};
-
 export type QuickResultResponse = {
   title: string;
   new_overall: number;
   drop_overall: number;
   new_avg: number;
   drop_avg: number;
+};
+
+export type HomeDataResponse = {
+  dashboard: DashboardResponse;
+  subjects: HomeSubject[];
+  tomorrow: QuickResultResponse;
+  best_day: QuickResultResponse;
+  worst_day: QuickResultResponse;
 };
 
 export type ImportSubject = {
@@ -284,6 +287,72 @@ async function fetchDeduped<T>(
   return promise;
 }
 
+// sessionStorage-backed TTL cache. Serves fresh cached data across client-side
+// navigations without a network call; falls through to `fetcher` when stale.
+function readCache<T>(key: string, ttlMs: number): T | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as { t: number; v: T };
+    if (!parsed || Date.now() - parsed.t > ttlMs) return null;
+
+    return parsed.v;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache<T>(key: string, value: T) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify({ t: Date.now(), v: value }));
+  } catch {
+    /* quota exceeded / unavailable */
+  }
+}
+
+export function invalidateCache(...keys: string[]) {
+  for (const key of keys) {
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      /* ignore */
+    }
+    pendingRequests.delete(key);
+  }
+}
+
+async function cachedFetch<T>(
+  key: string,
+  ttlMs: number,
+  fetcher: () => Promise<T>
+): Promise<T> {
+  const cached = readCache<T>(key, ttlMs);
+  if (cached !== null) return cached;
+
+  const value = await fetchDeduped(key, fetcher);
+  writeCache(key, value);
+  return value;
+}
+
+// Cache TTL for attendance/schedule reads (ms).
+const READ_TTL = 60 * 1000;
+
+// Synchronous cache peek. Lets a page seed its initial state from a prior
+// fetch so cached content paints immediately instead of flashing a loader.
+// Returns null when the entry is missing or older than READ_TTL.
+export function getCachedHomeData(userId: number): HomeDataResponse | null {
+  return readCache<HomeDataResponse>(`home-data-${userId}`, READ_TTL);
+}
+
+export function getCachedSubjects(userId: number): SubjectResponse[] | null {
+  return readCache<SubjectResponse[]>(`subjects-${userId}`, READ_TTL);
+}
+
+export function getCachedSchedule(userId: number): ScheduleEntry[] | null {
+  return readCache<ScheduleEntry[]>(`schedule-${userId}`, READ_TTL);
+}
+
 /* ---------------- USER ---------------- */
 
 export async function getUser(userId: number) {
@@ -299,6 +368,8 @@ export async function updateUser(
     semester: string;
     section: string;
     default_target: number;
+    tagline?: string;
+    links?: { label: string; url: string }[];
   },
   userId: number
 ) {
@@ -312,6 +383,13 @@ export async function updateUser(
 }
 
 export async function clearAllUserData(userId: number) {
+  invalidateCache(
+    `home-data-${userId}`,
+    `dashboard-${userId}`,
+    `subjects-${userId}`,
+    `schedule-${userId}`
+  );
+
   const res = await fetchWithRetry(`${API_BASE}/users/${userId}/clear-data`, {
     method: "DELETE",
   });
@@ -371,33 +449,11 @@ export async function verifySubscriptionPayment(
 
 /* ---------------- DASHBOARD / HOME ---------------- */
 
-export async function getDashboard(userId: number) {
-  return fetchDeduped(`dashboard-${userId}`, async () => {
-    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/dashboard`);
-    return handleResponse<DashboardResponse>(res);
-  });
-}
-
 export async function getHomeData(userId: number) {
-  return fetchDeduped(`home-data-${userId}`, async () => {
+  return cachedFetch(`home-data-${userId}`, READ_TTL, async () => {
     const res = await fetchWithRetry(`${API_BASE}/users/${userId}/home-data`);
     return handleResponse<HomeDataResponse>(res);
   });
-}
-
-export async function getTomorrow(userId: number) {
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/tomorrow`);
-  return handleResponse<QuickResultResponse>(res);
-}
-
-export async function getBestDay(userId: number) {
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/best-day`);
-  return handleResponse<QuickResultResponse>(res);
-}
-
-export async function getWorstDay(userId: number) {
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/worst-day`);
-  return handleResponse<QuickResultResponse>(res);
 }
 
 export async function markAttendance(
@@ -408,6 +464,8 @@ export async function markAttendance(
   },
   userId: number
 ) {
+  invalidateCache(`home-data-${userId}`, `dashboard-${userId}`, `subjects-${userId}`);
+
   const res = await fetchWithRetry(`${API_BASE}/users/${userId}/mark-attendance`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -426,6 +484,8 @@ export async function importAttendance(
   },
   userId: number
 ) {
+  invalidateCache(`home-data-${userId}`, `dashboard-${userId}`, `subjects-${userId}`);
+
   const res = await fetchWithRetry(
     `${API_BASE}/users/${userId}/import-attendance`,
     {
@@ -441,7 +501,7 @@ export async function importAttendance(
 /* ---------------- SUBJECTS ---------------- */
 
 export async function getSubjects(userId: number) {
-  return fetchDeduped(`subjects-${userId}`, async () => {
+  return cachedFetch(`subjects-${userId}`, READ_TTL, async () => {
     const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subjects`);
     const data = await handleResponse<unknown>(res);
 
@@ -463,7 +523,7 @@ export async function saveSubject(
   userId: number
 ) {
   // Clear cache after save
-  pendingRequests.delete(`subjects-${userId}`);
+  invalidateCache(`subjects-${userId}`, `home-data-${userId}`, `dashboard-${userId}`);
 
   const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subjects`, {
     method: "POST",
@@ -476,7 +536,7 @@ export async function saveSubject(
 
 export async function deleteSubject(subjectId: number, userId: number) {
   // Clear cache after delete
-  pendingRequests.delete(`subjects-${userId}`);
+  invalidateCache(`subjects-${userId}`, `home-data-${userId}`, `dashboard-${userId}`);
 
   const res = await fetchWithRetry(
     `${API_BASE}/users/${userId}/subjects/${subjectId}`,
@@ -505,7 +565,7 @@ function normalizeScheduleResponse(data: unknown): ScheduleEntry[] {
 }
 
 export async function getSchedule(userId: number) {
-  return fetchDeduped(`schedule-${userId}`, async () => {
+  return cachedFetch(`schedule-${userId}`, READ_TTL, async () => {
     const res = await fetchWithRetry(`${API_BASE}/users/${userId}/schedule`);
     const data = await handleResponse<unknown>(res);
     return normalizeScheduleResponse(data);
@@ -514,7 +574,7 @@ export async function getSchedule(userId: number) {
 
 export async function saveSchedule(payload: ScheduleEntry[], userId: number) {
   // Clear cache after save
-  pendingRequests.delete(`schedule-${userId}`);
+  invalidateCache(`schedule-${userId}`, `home-data-${userId}`);
 
   const res = await fetchWithRetry(`${API_BASE}/users/${userId}/schedule`, {
     method: "POST",
@@ -533,32 +593,6 @@ export async function getTimetable(userId: number) {
 
 export async function saveTimetable(payload: ScheduleEntry[], userId: number) {
   return saveSchedule(payload, userId);
-}
-
-/* ---------------- PLAN ---------------- */
-
-export async function planBunks(
-  payload: {
-    mode: "tomorrow" | "next_n_days" | "selected_weekdays";
-    n_days?: number;
-    weeks?: number;
-    selected_days?: string[];
-  },
-  userId: number
-) {
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/plan-bunks`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  return handleResponse<{
-    scenario_label: string;
-    new_overall: number;
-    drop_overall: number;
-    new_avg: number;
-    drop_avg: number;
-  }>(res);
 }
 
 /* ---------------- CALENDAR PLAN ---------------- */
@@ -595,4 +629,237 @@ export async function calendarPlan(
       reason: string;
     }>;
   }>(res);
+}
+
+// ─── Feed Types ────────────────────────────────────────
+export type FeedPollOption = {
+  id: number;
+  option_text: string;
+  votes_count: number;
+};
+
+export type FeedPoll = {
+  id: number;
+  question: string;
+  options: FeedPollOption[];
+};
+
+export type FeedPost = {
+  id: number;
+  user_id: number;
+  user_name: string;
+  content: string;
+  media_url: string;
+  view_count: number;
+  created_at: string;
+  like_count: number;
+  comment_count: number;
+  is_liked?: boolean;
+  poll: FeedPoll | null;
+};
+
+export type FeedResponse = {
+  posts: FeedPost[];
+  page: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
+};
+
+export type FeedComment = {
+  id: number;
+  user_id: number;
+  user_name: string;
+  content: string;
+  created_at: string;
+};
+
+// ─── Feed Functions ────────────────────────────────────
+export async function getFeedPosts(page: number = 1, limit: number = 10, userId?: number) {
+  const url = userId
+    ? `${API_BASE}/feed/posts?page=${page}&limit=${limit}&user_id=${userId}`
+    : `${API_BASE}/feed/posts?page=${page}&limit=${limit}`;
+  const res = await fetchWithRetry(url);
+  return handleResponse<FeedResponse>(res);
+}
+
+export async function createFeedPost(payload: {
+  user_id: number;
+  content: string;
+  media_url?: string;
+  poll?: { question: string; options: { text: string }[] } | null;
+}) {
+  const res = await fetchWithRetry(`${API_BASE}/feed/posts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<FeedPost>(res);
+}
+
+export async function deleteFeedPost(postId: number, userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/feed/posts/${postId}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  return handleResponse<{ message: string }>(res);
+}
+
+export async function toggleFeedLike(postId: number, userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/feed/posts/${postId}/like`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  return handleResponse<{ liked: boolean; message: string }>(res);
+}
+
+export async function getFeedComments(postId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/feed/posts/${postId}/comments`);
+  return handleResponse<FeedComment[]>(res);
+}
+
+export async function addFeedComment(
+  postId: number,
+  payload: { user_id: number; content: string },
+) {
+  const res = await fetchWithRetry(`${API_BASE}/feed/posts/${postId}/comments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<FeedComment>(res);
+}
+
+export async function trackPostView(postId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/feed/posts/${postId}/view`, {
+    method: "POST",
+  });
+  return handleResponse<{ view_count: number }>(res);
+}
+
+export async function voteOnPoll(postId: number, userId: number, optionId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/feed/posts/${postId}/vote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, option_id: optionId }),
+  });
+  return handleResponse<{ message: string }>(res);
+}
+
+export async function getUserByEmailPrefix(prefix: string) {
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/by-email-prefix/${encodeURIComponent(prefix)}`,
+  );
+  return handleResponse<{ id: number; name: string; email: string }>(res);
+}
+
+// ─── Friends Types ─────────────────────────────────────
+export type FriendUser = {
+  id: number;
+  user_id: number;
+  friendship_id: number;
+  name: string;
+  email: string;
+};
+
+export type SearchUserResult = {
+  id: number;
+  name: string;
+  email: string;
+};
+
+// ─── Friends Functions ─────────────────────────────────
+export async function getFriends(userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/friends`);
+  return handleResponse<{ friends: FriendUser[] }>(res);
+}
+
+export async function getFriendRequests(userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/friend-requests`);
+  return handleResponse<{ incoming: FriendUser[]; outgoing: FriendUser[] }>(res);
+}
+
+export async function sendFriendRequest(userId: number, targetUserId: number) {
+  const res = await fetchWithRetry(    `${API_BASE}/users/${userId}/friend-requests`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_user_id: targetUserId }),
+  });
+  return handleResponse<{ message: string; status?: string }>(res);
+}
+
+export async function respondFriendRequest(userId: number, requesterId: number, accept: boolean | string) {
+  const accepted = typeof accept === "boolean" ? accept : accept === "accept";
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/friend-requests/${requesterId}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accept: accepted }),
+    },
+  );
+  return handleResponse<{ message: string; status?: string }>(res);
+}
+
+export async function removeFriend(userId: number, friendId: number) {
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/friends/${friendId}`,
+    { method: "DELETE" },
+  );
+  return handleResponse<{ message: string }>(res);
+}
+
+export async function searchUsers(query: string) {
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/search?q=${encodeURIComponent(query)}`,
+  );
+  return handleResponse<SearchUserResult[]>(res);
+}
+
+// ─── Profile Types ─────────────────────────────────────
+export type UserProfile = {
+  id: number;
+  name: string;
+  email: string;
+  college: string;
+  branch: string;
+  semester: string;
+  section: string;
+  photo?: string;
+  tagline?: string;
+  links?: { label: string; url: string }[];
+  post_count: number;
+  friend_count: number;
+  relationship?: string;
+  relationship_friendship_id?: number;
+  recent_posts?: FeedPost[];
+};
+
+// ─── Profile Functions ─────────────────────────────────
+export async function getUserProfile(userId: number, currentUserId?: number) {
+  const url = currentUserId
+    ? `${API_BASE}/users/${userId}/profile?current_user_id=${currentUserId}`
+    : `${API_BASE}/users/${userId}/profile`;
+  const res = await fetchWithRetry(url);
+  return handleResponse<UserProfile>(res);
+}
+
+// ─── Spidy Types ───────────────────────────────────────
+export type SpidySearchResult = {
+  id: number;
+  subject_name: string;
+  drive_link: string;
+  description: string;
+};
+
+// ─── Spidy Functions ───────────────────────────────────
+export async function spidySearch(query: string) {
+  const res = await fetchWithRetry(`${API_BASE}/spidy/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  return handleResponse<{ results: SpidySearchResult[]; message: string }>(res);
 }

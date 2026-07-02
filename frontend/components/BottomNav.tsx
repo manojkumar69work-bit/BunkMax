@@ -5,14 +5,14 @@ import { usePathname } from "next/navigation";
 import {
   Home,
   Calendar,
-  MessageCircle,
+  BookOpen,
   Zap,
   User,
 } from "lucide-react";
 
 const tabs = [
+  { href: "/subjects", label: "Subject", icon: BookOpen },
   { href: "/schedule", label: "Schedule", icon: Calendar },
-  { href: "/chat", label: "Chat", icon: MessageCircle },
   { href: "/", label: "Home", icon: Home, center: true },
   { href: "/plan", label: "Plan", icon: Zap },
   { href: "/profile", label: "Profile", icon: User },

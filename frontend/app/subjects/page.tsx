@@ -2,9 +2,15 @@
 
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
-import { deleteSubject, getSubjects, saveSubject } from "@/lib/api";
+import {
+  deleteSubject,
+  getSubjects,
+  getCachedSubjects,
+  saveSubject,
+} from "@/lib/api";
 import { useAppUser } from "@/lib/user";
-import FullScreenLoader from "@/components/FullScreenLoader";
+import Skeleton from "@/components/Skeleton";
+import { SubjectsPageSkeleton } from "@/components/PageSkeleton";
 import { Trash2 } from "lucide-react";
 
 type Subject = {
@@ -22,8 +28,14 @@ function calculateAttendance(attended: number, total: number) {
 export default function SubjectsPage() {
   const { appUser, loadingUser } = useAppUser();
 
-  const [subjects, setSubjects] = useState<Subject[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Seed synchronously from the shared read cache so returning to this tab
+  // paints instantly instead of flashing a loader while the network revalidates.
+  const [subjects, setSubjects] = useState<Subject[]>(
+    () => (appUser?.id ? getCachedSubjects(appUser.id) ?? [] : [])
+  );
+  const [loading, setLoading] = useState(
+    () => !(appUser?.id && getCachedSubjects(appUser.id))
+  );
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<number | null>(null);
 
@@ -41,8 +53,9 @@ export default function SubjectsPage() {
 
   async function loadSubjects(userId: number) {
     try {
-      setLoading(true);
       setError("");
+      // getSubjects serves + refreshes the shared read cache; revalidate in the
+      // background while any cached content stays on screen.
       const data = await getSubjects(userId);
       setSubjects(data);
     } catch (e) {
@@ -163,7 +176,12 @@ export default function SubjectsPage() {
   }
 
   if (loadingUser) {
-    return <FullScreenLoader label="Loading BunkMax..." />;
+    return (
+      <div className="app-shell">
+        <SubjectsPageSkeleton />
+        <BottomNav />
+      </div>
+    );
   }
 
   if (!appUser) {
@@ -181,10 +199,6 @@ export default function SubjectsPage() {
         </div>
       </div>
     );
-  }
-
-  if (loading) {
-    return <FullScreenLoader label="Loading subjects..." />;
   }
 
   return (
@@ -252,7 +266,13 @@ export default function SubjectsPage() {
 
       <div className="section-title">Saved Subjects</div>
 
-      {subjects.length === 0 ? (
+      {loading && subjects.length === 0 ? (
+        <div className="space-y-3">
+          <Skeleton className="h-[150px]" />
+          <Skeleton className="h-[150px]" />
+          <Skeleton className="h-[150px]" />
+        </div>
+      ) : subjects.length === 0 ? (
         <div className="glass-card p-4 text-sm text-gray-400">
           No subjects added yet.
         </div>

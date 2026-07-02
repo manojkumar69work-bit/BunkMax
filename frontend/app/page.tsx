@@ -6,12 +6,13 @@ import Link from "next/link";
 import {
   getHomeData,
   getSchedule,
-  getTomorrow,
-  getBestDay,
-  getWorstDay,
+  getCachedHomeData,
+  getCachedSchedule,
   type ScheduleEntry,
+  type HomeDataResponse,
 } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
+import Skeleton from "@/components/Skeleton";
 import { Info, Upload } from "lucide-react";
 import { useAppUser } from "@/lib/user";
 
@@ -50,19 +51,68 @@ const DAY_ORDER = [
   "Saturday",
 ];
 
+function groupSchedule(entries: ScheduleEntry[]): Record<string, string[]> {
+  const grouped: Record<string, string[]> = {};
+
+  entries.forEach((item) => {
+    if (!item?.day_name) return;
+
+    if (!grouped[item.day_name]) {
+      grouped[item.day_name] = [];
+    }
+
+    if (item.subject_name && String(item.subject_name).trim()) {
+      grouped[item.day_name].push(item.subject_name);
+    }
+  });
+
+  return grouped;
+}
+
 export default function Home() {
   const { appUser, loadingUser } = useAppUser();
 
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [subjects, setSubjects] = useState<HomeSubject[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Seed synchronously from the shared read cache so returning to the tab paints
+  // instantly instead of flashing a loader while the network revalidates.
+  const [data, setData] = useState<DashboardData | null>(
+    () => (appUser?.id ? getCachedHomeData(appUser.id)?.dashboard ?? null : null)
+  );
+  const [subjects, setSubjects] = useState<HomeSubject[]>(
+    () => (appUser?.id ? getCachedHomeData(appUser.id)?.subjects ?? [] : [])
+  );
+  const [loading, setLoading] = useState(
+    () => !(appUser?.id && getCachedHomeData(appUser.id))
+  );
   const [error, setError] = useState("");
 
-  const [tomorrow, setTomorrow] = useState<QuickResult | null>(null);
-  const [best, setBest] = useState<QuickResult | null>(null);
-  const [worst, setWorst] = useState<QuickResult | null>(null);
+  // Impacts ride along in the home-data payload, so they're seeded from the
+  // shared read cache and refreshed by a single getHomeData() call. The button
+  // handlers just reveal — they never refetch. This collapses what used to be
+  // up to 4 separate API calls per home view into exactly 1.
+  const [impacts, setImpacts] = useState<{
+    tomorrow: QuickResult;
+    best: QuickResult;
+    worst: QuickResult;
+  } | null>(() => {
+    const cached = appUser?.id ? getCachedHomeData(appUser.id) : null;
+    return cached
+      ? {
+          tomorrow: cached.tomorrow,
+          best: cached.best_day,
+          worst: cached.worst_day,
+        }
+      : null;
+  });
+  const [revealed, setRevealed] = useState<{
+    tomorrow: boolean;
+    best: boolean;
+    worst: boolean;
+  }>({ tomorrow: false, best: false, worst: false });
 
-  const [timetable, setTimetable] = useState<Record<string, string[]>>({});
+  const [timetable, setTimetable] = useState<Record<string, string[]>>(() => {
+    const cached = appUser?.id ? getCachedSchedule(appUser.id) : null;
+    return cached ? groupSchedule(cached) : {};
+  });
   const [busy, setBusy] = useState<"" | "tomorrow" | "best" | "worst">("");
 
   const daysStatus = useMemo(() => {
@@ -81,62 +131,40 @@ export default function Home() {
 
   useEffect(() => {
     if (!appUser?.id) return;
-    if (!appUser.is_pro) {
-      setTimetable({});
-      return;
-    }
 
     const userId = appUser.id;
 
     async function loadSchedule() {
       try {
         const scheduleData = await getSchedule(userId);
-        const grouped: Record<string, string[]> = {};
-
-        scheduleData.forEach((item: ScheduleEntry) => {
-          if (!item?.day_name) return;
-
-          if (!grouped[item.day_name]) {
-            grouped[item.day_name] = [];
-          }
-
-          if (item.subject_name && String(item.subject_name).trim()) {
-            grouped[item.day_name].push(item.subject_name);
-          }
-        });
-
-        setTimetable(grouped);
+        setTimetable(groupSchedule(scheduleData));
       } catch (err) {
         console.error("Schedule load failed:", err);
       }
     }
 
-    loadSchedule();
-  }, [appUser?.id, appUser?.is_pro]);
+    if (!getCachedSchedule(userId)) {
+      loadSchedule();
+    }
+  }, [appUser?.id]);
 
   useEffect(() => {
     if (!appUser?.id) return;
-    if (!appUser.is_pro) {
-      setLoading(false);
-      setError("");
-      setData(null);
-      setSubjects([]);
-      return;
-    }
 
     const userId = appUser.id;
     loadDashboard(userId);
-  }, [appUser?.id, appUser?.is_pro]);
+  }, [appUser?.id]);
 
   async function loadDashboard(userId: number) {
     try {
-      setLoading(true);
       setError("");
 
+      // getHomeData serves + refreshes the shared read cache (home-data,
+      // subjects, tomorrow, best_day, worst_day in one round-trip); revalidate
+      // in the background while any cached content stays on screen.
       const homeData = await getHomeData(userId);
 
-      setData(homeData.dashboard);
-      setSubjects(homeData.subjects || []);
+      applyHomeData(homeData);
     } catch (e) {
       const errorMsg =
         e instanceof Error ? e.message : "Failed to load home data";
@@ -147,72 +175,59 @@ export default function Home() {
     }
   }
 
-  async function runTomorrow() {
-    if (!appUser?.id || !appUser.is_pro || busy) return;
-
-    const userId = appUser.id;
-
-    try {
-      setBusy("tomorrow");
-      setError("");
-
-      const result = await getTomorrow(userId);
-      const nextClassDay = getNextClassDay(timetable);
-
-      setTomorrow(
-        nextClassDay
-          ? {
-              ...result,
-              title: `Next Class Day (${nextClassDay})`,
-            }
-          : result
-      );
-    } catch (e) {
-      const errorMsg =
-        e instanceof Error ? e.message : "Failed to load prediction";
-      setError(errorMsg);
-      console.error("Tomorrow prediction error:", errorMsg);
-    } finally {
-      setBusy("");
-    }
+  function applyHomeData(homeData: HomeDataResponse) {
+    setData(homeData.dashboard);
+    setSubjects(homeData.subjects || []);
+    setImpacts((prev) => ({
+      tomorrow: homeData.tomorrow ?? prev?.tomorrow ?? {
+        title: "Tomorrow",
+        new_overall: 0,
+        new_avg: 0,
+        drop_overall: 0,
+        drop_avg: 0,
+      },
+      best: homeData.best_day ?? prev?.best ?? {
+        title: "Best day",
+        new_overall: 0,
+        new_avg: 0,
+        drop_overall: 0,
+        drop_avg: 0,
+      },
+      worst: homeData.worst_day ?? prev?.worst ?? {
+        title: "Worst day",
+        new_overall: 0,
+        new_avg: 0,
+        drop_overall: 0,
+        drop_avg: 0,
+      },
+    }));
   }
 
-  async function runBest() {
-    if (!appUser?.id || !appUser.is_pro || busy) return;
-
-    const userId = appUser.id;
-
-    try {
-      setBusy("best");
-      setError("");
-      setBest(await getBestDay(userId));
-    } catch (e) {
-      const errorMsg =
-        e instanceof Error ? e.message : "Failed to find best day";
-      setError(errorMsg);
-      console.error("Best day error:", errorMsg);
-    } finally {
-      setBusy("");
+  function revealImpact(key: "tomorrow" | "best" | "worst") {
+    if (!impacts) {
+      // Cache miss on first paint; refresh and try again.
+      if (!busy && appUser?.id) {
+        setBusy(key);
+        loadDashboard(appUser.id).finally(() => setBusy(""));
+      }
+      return;
     }
+
+    const override =
+      key === "tomorrow"
+        ? { ...impacts.tomorrow, title: titleForNextClass(timetable) }
+        : null;
+
+    if (override) {
+      setImpacts({ ...impacts, tomorrow: override });
+    }
+
+    setRevealed((prev) => ({ ...prev, [key]: true }));
   }
 
-  async function runWorst() {
-    if (!appUser?.id || !appUser.is_pro || busy) return;
-
-    const userId = appUser.id;
-
-    try {
-      setBusy("worst");
-      setError("");
-      setWorst(await getWorstDay(userId));
-    } catch (e) {
-      const errorMsg =
-        e instanceof Error ? e.message : "Failed to find worst day";
-      setError(errorMsg);
-      console.error("Worst day error:", errorMsg);
-    } finally {
-      setBusy("");
-    }
+  function titleForNextClass(schedule: Record<string, string[]>) {
+    const nextClassDay = getNextClassDay(schedule);
+    return nextClassDay ? `Next Class Day (${nextClassDay})` : "Tomorrow";
   }
 
   function getSubjectCounts(subjectName: string) {
@@ -243,10 +258,6 @@ export default function Home() {
     );
   }
 
-  if (loading) {
-    return <FullScreenLoader label="Loading dashboard..." />;
-  }
-
   return (
     <div className="app-shell">
       <div className="flex items-start justify-between gap-3">
@@ -268,6 +279,8 @@ export default function Home() {
           </Link>
         </div>
       </div>
+
+      {loading && !data && <DashboardSkeleton />}
 
       {error && (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
@@ -309,28 +322,28 @@ export default function Home() {
           <QuickCard
             title="Should I skip tomorrow?"
             desc="Impact of missing the next class day."
-            buttonText={busy === "tomorrow" ? "Checking..." : "Check Tomorrow"}
-            onClick={runTomorrow}
-            result={tomorrow}
-            disabled={busy !== ""}
+            buttonText={revealed.tomorrow ? "Viewed" : "Check Tomorrow"}
+            onClick={() => revealImpact("tomorrow")}
+            result={impacts?.tomorrow ?? null}
+            disabled={revealed.tomorrow || busy !== ""}
           />
 
           <QuickCard
             title="Best day to skip"
             desc="Find the day with least attendance impact."
-            buttonText={busy === "best" ? "Finding..." : "Find Best Day"}
-            onClick={runBest}
-            result={best}
-            disabled={busy !== ""}
+            buttonText={revealed.best ? "Viewed" : "Find Best Day"}
+            onClick={() => revealImpact("best")}
+            result={impacts?.best ?? null}
+            disabled={revealed.best || busy !== ""}
           />
 
           <QuickCard
             title="Avoid skipping on"
             desc="Know the day with highest attendance impact."
-            buttonText={busy === "worst" ? "Finding..." : "Find Worst Day"}
-            onClick={runWorst}
-            result={worst}
-            disabled={busy !== ""}
+            buttonText={revealed.worst ? "Viewed" : "Find Worst Day"}
+            onClick={() => revealImpact("worst")}
+            result={impacts?.worst ?? null}
+            disabled={revealed.worst || busy !== ""}
           />
 
           <div className="section-title">Today&apos;s Classes</div>
@@ -374,6 +387,29 @@ export default function Home() {
 
       <BottomNav />
     </div>
+  );
+}
+
+function DashboardSkeleton() {
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3 items-stretch">
+        <Skeleton className="row-span-2 min-h-[220px]" />
+        <Skeleton className="min-h-[104px]" />
+        <Skeleton className="min-h-[104px]" />
+      </div>
+
+      <Skeleton className="h-[76px]" />
+
+      <div className="section-title">Quick Actions</div>
+      <Skeleton className="h-[120px]" />
+      <Skeleton className="h-[120px]" />
+      <Skeleton className="h-[120px]" />
+
+      <div className="section-title">Today&apos;s Classes</div>
+      <Skeleton className="h-[84px]" />
+      <Skeleton className="h-[84px]" />
+    </>
   );
 }
 

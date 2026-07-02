@@ -3,10 +3,10 @@
 import { useEffect, useState } from "react";
 import { signOut } from "next-auth/react";
 import BottomNav from "@/components/BottomNav";
-import { clearAllUserData, getUser, updateUser } from "@/lib/api";
+import { clearAllUserData, updateUser } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
 import PushNotificationSettings from "@/components/PushNotificationSettings";
-import { useAppUser } from "@/lib/user";
+import { mutateUser, useAppUser } from "@/lib/user";
 import { ChevronRight, UserRound } from "lucide-react";
 
 type EditField = "name" | "college" | "branch" | "semester" | "section" | null;
@@ -23,7 +23,6 @@ export default function ProfilePage() {
     default_target: 75,
   });
 
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [message, setMessage] = useState("");
@@ -34,32 +33,19 @@ export default function ProfilePage() {
   const [editingField, setEditingField] = useState<EditField>(null);
   const [editValue, setEditValue] = useState("");
 
+  // The shared user cache already carries every profile field, so seed the form
+  // from it directly instead of firing a redundant /users/{id} request.
   useEffect(() => {
-    async function load() {
-      if (!appUser?.id) return;
+    if (!appUser) return;
 
-      try {
-        setLoading(true);
-        setError("");
-
-        const user = await getUser(appUser.id);
-
-        setForm({
-          name: user.name || "",
-          college: user.college || "",
-          branch: user.branch || "",
-          semester: user.semester || "",
-          section: user.section || "",
-          default_target: user.default_target || 75,
-        });
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load profile.");
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    load();
+    setForm({
+      name: appUser.name || "",
+      college: appUser.college || "",
+      branch: appUser.branch || "",
+      semester: appUser.semester || "",
+      section: appUser.section || "",
+      default_target: appUser.default_target || 75,
+    });
   }, [appUser]);
 
   function openEdit(field: EditField, value: string) {
@@ -88,6 +74,9 @@ export default function ProfilePage() {
       setMessage("");
 
       await updateUser(form, appUser.id);
+      // Keep the shared user cache in sync so other screens reflect the edit
+      // without another network round-trip.
+      mutateUser(form);
       setMessage("Profile updated successfully.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update profile.");
@@ -133,10 +122,6 @@ export default function ProfilePage() {
         </div>
       </div>
     );
-  }
-
-  if (loading) {
-    return <FullScreenLoader label="Loading profile..." />;
   }
 
   return (

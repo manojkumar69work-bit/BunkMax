@@ -7,10 +7,15 @@ import hmac
 import logging
 import math
 import os
+import re
+import threading
+import time
+from collections import defaultdict, deque
 
 from database import get_conn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 import razorpay
 
@@ -32,7 +37,32 @@ app = FastAPI(title="BunkMax API")
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "bunkmax-api"}
+    """
+    Deep health check used by the external keep-alive pinger.
+
+    Runs a tiny `SELECT 1` so a single ping keeps BOTH the Render web
+    service and the Supabase database from sleeping. Always returns HTTP
+    200 (even if the DB is briefly unreachable) so the pinger keeps the
+    web service warm regardless of transient DB hiccups.
+    """
+    db_ok = False
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            db_ok = True
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Health check DB ping failed")
+
+    return {
+        "status": "ok",
+        "service": "bunkmax-api",
+        "db": "ok" if db_ok else "down",
+    }
 
 
 def get_allowed_origins() -> list[str]:
@@ -78,6 +108,94 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Lightweight in-memory rate limiting
+#
+# All real traffic reaches this backend from the Vercel proxy, so every
+# request shares a small set of source IPs. Limiting per-IP would throttle
+# every student as one client. Instead we key the limit on the user id in
+# the request path (/users/{id}/...), which is exactly what stops a single
+# student (or a runaway script) from hammering the API and exhausting the
+# free-tier CPU / DB pool. Requests without a user id fall back to IP.
+#
+# State is per-process (per uvicorn worker). That is fine for basic abuse
+# protection; it is a safety valve, not a billing meter.
+# ---------------------------------------------------------------------------
+
+def _get_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+RATE_LIMIT_MAX = max(1, _get_int_env("RATE_LIMIT_MAX", 180))
+RATE_LIMIT_WINDOW = max(1, _get_int_env("RATE_LIMIT_WINDOW", 60))
+RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+# Paths that must never be rate limited (keep-alive pinger, root probe).
+_RATE_LIMIT_EXEMPT_PATHS = {"/health", "/"}
+_USER_ID_PATH_RE = re.compile(r"^/users/(\d+)")
+
+_rate_lock = threading.Lock()
+_rate_hits: dict[str, deque] = defaultdict(deque)
+
+
+def _rate_limit_key(request: Request) -> str:
+    match = _USER_ID_PATH_RE.match(request.url.path)
+    if match:
+        return f"u:{match.group(1)}"
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    client_ip = forwarded.split(",")[0].strip() if forwarded else ""
+    if not client_ip and request.client:
+        client_ip = request.client.host
+    return f"ip:{client_ip or 'unknown'}"
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if (
+        not RATE_LIMIT_ENABLED
+        or request.method == "OPTIONS"
+        or request.url.path in _RATE_LIMIT_EXEMPT_PATHS
+    ):
+        return await call_next(request)
+
+    key = _rate_limit_key(request)
+    now = time.monotonic()
+    window_start = now - RATE_LIMIT_WINDOW
+
+    with _rate_lock:
+        hits = _rate_hits[key]
+        while hits and hits[0] < window_start:
+            hits.popleft()
+
+        if len(hits) >= RATE_LIMIT_MAX:
+            retry_after = max(1, int(RATE_LIMIT_WINDOW - (now - hits[0])))
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "detail": "Too many requests. Please slow down and try again shortly."
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        hits.append(now)
+
+        # Opportunistic cleanup so idle keys don't accumulate forever.
+        if len(_rate_hits) > 5000:
+            for stale_key in [k for k, v in _rate_hits.items() if not v]:
+                del _rate_hits[stale_key]
+
+    return await call_next(request)
 
 
 def require_secret(
@@ -220,12 +338,6 @@ class PushTokenPayload(BaseModel):
     platform: str = Field(default="", max_length=512)
     user_agent: str = Field(default="", max_length=512)
 
-
-class PlanPayload(BaseModel):
-    mode: Literal["tomorrow", "next_n_days", "selected_weekdays"]
-    n_days: Optional[int] = Field(default=None, ge=1, le=365)
-    weeks: Optional[int] = Field(default=None, ge=1, le=52)
-    selected_days: Optional[list[str]] = None
 
 
 class CalendarPlanDay(BaseModel):
@@ -2287,23 +2399,14 @@ def build_dashboard_payload(user_id: int):
         ],
     }
 
-    return dashboard, subjects
+    return dashboard, subjects, day_map
 
-
-@app.get("/users/{user_id}/dashboard")
-def get_dashboard(user_id: int, _: None = Depends(require_service_secret)):
-    try:
-        dashboard, _ = build_dashboard_payload(user_id)
-        return dashboard
-    except Exception:
-        logger.exception("Failed to load dashboard for user %s", user_id)
-        raise HTTPException(status_code=500, detail="Failed to load dashboard")
 
 
 @app.get("/users/{user_id}/home-data")
 def get_home_data(user_id: int, _: None = Depends(require_service_secret)):
     try:
-        dashboard, subjects = build_dashboard_payload(user_id)
+        dashboard, subjects, day_map = build_dashboard_payload(user_id)
 
         return {
             "dashboard": dashboard,
@@ -2315,6 +2418,9 @@ def get_home_data(user_id: int, _: None = Depends(require_service_secret)):
                 }
                 for s in subjects
             ],
+            "tomorrow": compute_tomorrow(subjects, day_map),
+            "best_day": compute_day_logic(subjects, day_map, best=True),
+            "worst_day": compute_day_logic(subjects, day_map, best=False),
         }
 
     except Exception:
@@ -2447,12 +2553,10 @@ def save_schedule(
         conn.close()
 
 
-@app.get("/users/{user_id}/tomorrow")
-def get_tomorrow(user_id: int, _: None = Depends(require_service_secret)):
-    subjects = load_subjects_minimal(user_id)
-    timetable_rows = load_timetable_rows(user_id)
-    day_map = build_day_map(timetable_rows)
-
+def compute_tomorrow(
+    subjects: list[dict[str, Any]],
+    day_map: dict[str, list[dict[str, Any]]],
+):
     current_overall = calc_overall(subjects)
     current_avg = calc_avg(subjects)
 
@@ -2479,21 +2583,11 @@ def get_tomorrow(user_id: int, _: None = Depends(require_service_secret)):
     }
 
 
-@app.get("/users/{user_id}/best-day")
-def get_best_day(user_id: int, _: None = Depends(require_service_secret)):
-    return _day_logic(user_id, best=True)
-
-
-@app.get("/users/{user_id}/worst-day")
-def get_worst_day(user_id: int, _: None = Depends(require_service_secret)):
-    return _day_logic(user_id, best=False)
-
-
-def _day_logic(user_id: int, best: bool):
-    subjects = load_subjects_minimal(user_id)
-    timetable_rows = load_timetable_rows(user_id)
-    day_map = build_day_map(timetable_rows)
-
+def compute_day_logic(
+    subjects: list[dict[str, Any]],
+    day_map: dict[str, list[dict[str, Any]]],
+    best: bool,
+):
     current_overall = calc_overall(subjects)
     current_avg = calc_avg(subjects)
 
@@ -2562,76 +2656,6 @@ def _day_logic(user_id: int, best: bool):
         "drop_avg": round(chosen["drop_avg"], 2),
     }
 
-
-@app.post("/users/{user_id}/plan-bunks")
-def plan_bunks(
-    user_id: int,
-    payload: PlanPayload,
-    _: None = Depends(require_service_secret),
-):
-    subjects = load_subjects_minimal(user_id)
-    timetable_rows = load_timetable_rows(user_id)
-    day_map = build_day_map(timetable_rows)
-
-    current_overall = calc_overall(subjects)
-    current_avg = calc_avg(subjects)
-
-    missed_classes: list[dict[str, Any]] = []
-    label = ""
-
-    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-
-    if payload.mode == "tomorrow":
-        next_day_name = get_next_valid_class_day(day_map)
-
-        if next_day_name:
-            missed_classes = day_map.get(next_day_name, [])
-            label = f"Absent on {next_day_name}"
-        else:
-            label = "No upcoming classes"
-
-    elif payload.mode == "next_n_days":
-        n_days = payload.n_days or 1
-        count = 0
-
-        for i in range(1, 366):
-            if count >= n_days:
-                break
-
-            check_date = today + timedelta(days=i)
-            day_name = check_date.strftime("%A")
-            classes = day_map.get(day_name, [])
-
-            if any(clean_text(c.get("subject_name")) for c in classes):
-                missed_classes.extend(classes)
-                count += 1
-
-        label = f"Absent for next {count} class days"
-
-    elif payload.mode == "selected_weekdays":
-        selected_days = payload.selected_days or []
-        weeks = payload.weeks or 1
-
-        valid_selected_days = [
-            day for day in selected_days
-            if day in WEEKDAYS
-        ]
-
-        for _ in range(weeks):
-            for day_name in valid_selected_days:
-                missed_classes.extend(day_map.get(day_name, []))
-
-        label = "Absent on selected weekdays"
-
-    simulated = simulate_absence_for_subjects(subjects, missed_classes)
-
-    return {
-        "scenario_label": label,
-        "new_overall": round(simulated["new_overall"], 2),
-        "drop_overall": round(current_overall - simulated["new_overall"], 2),
-        "new_avg": round(simulated["new_avg"], 2),
-        "drop_avg": round(current_avg - simulated["new_avg"], 2),
-    }
 
 
 @app.post("/users/{user_id}/calendar-plan")

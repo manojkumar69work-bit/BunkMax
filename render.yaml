@@ -1,0 +1,46 @@
+# Render Blueprint for the BunkMax API (backend).
+#
+# If your Render service already exists (created manually), this file will
+# NOT change it automatically — copy the Start Command below into
+# Render Dashboard > your service > Settings. To manage the service via this
+# blueprint instead, use Render Dashboard > Blueprints > New and point it here.
+#
+# Free tier notes:
+#   * 512 MB RAM, shared CPU -> keep worker count low. A single uvicorn
+#     process serves sync DB endpoints concurrently via its thread pool,
+#     which is the right shape for this I/O-bound app and the smallest
+#     memory footprint.
+#   * The service sleeps after ~15 min idle. Keep it warm with an external
+#     cron pinging /health every ~10 min (see README / setup notes).
+services:
+  - type: web
+    name: bunkmax-api
+    runtime: python
+    plan: free
+    region: singapore            # closest to ap-south-1 Supabase; change if needed
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 65
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Pin a Python with prebuilt wheels for psycopg2-binary / firebase-admin.
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      # App-side DB pool. Stays comfortably under the Supabase transaction
+      # pooler's per-role connection budget.
+      - key: DB_POOL_MIN
+        value: "1"
+      - key: DB_POOL_MAX
+        value: "10"
+      # Rate limiting (per user id in path). Tune without a code change.
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: RATE_LIMIT_MAX
+        value: "180"
+      - key: RATE_LIMIT_WINDOW
+        value: "60"
+      # Secrets below must be set in the dashboard, NOT committed here:
+      #   DATABASE_URL, BACKEND_API_SECRET, ADMIN_API_SECRET,
+      #   FRONTEND_URL, ALLOWED_ORIGINS, FIREBASE_SERVICE_ACCOUNT_FILE,
+      #   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET

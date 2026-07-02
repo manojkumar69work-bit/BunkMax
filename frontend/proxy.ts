@@ -1,12 +1,10 @@
-export { auth as proxy } from "@/auth";
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+export function proxy(request: NextRequest) {
+  return NextResponse.next();
+}
 
 export const config = {
-  matcher: [
-    "/",
-    "/chat/:path*",
-    "/subjects/:path*",
-    "/schedule/:path*",
-    "/plan/:path*",
-    "/profile/:path*",
-  ],
+  matcher: [],
 };

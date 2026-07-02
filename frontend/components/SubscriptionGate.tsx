@@ -1,6 +1,5 @@
 "use client";
 
-import PaywallModal from "@/components/PaywallModal";
 import PushNotificationRegistrar from "@/components/PushNotificationRegistrar";
 import { useAppUser } from "@/lib/user";
 
@@ -9,17 +8,7 @@ export default function SubscriptionGate({
 }: {
   children: React.ReactNode;
 }) {
-  const { appUser, loadingUser } = useAppUser();
-
-  if (appUser && !appUser.is_pro) {
-    return (
-      <PaywallModal
-        key={appUser.id}
-        appUser={appUser}
-        loadingUser={loadingUser}
-      />
-    );
-  }
+  const { appUser } = useAppUser();
 
   return (
     <>

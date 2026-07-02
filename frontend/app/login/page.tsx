@@ -1,13 +1,17 @@
-import { signIn, auth } from "@/auth";
-import { redirect } from "next/navigation";
+"use client";
+
+import { signIn, useSession } from "next-auth/react";
 import { GraduationCap } from "lucide-react";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 
-export default async function LoginPage() {
-  const session = await auth();
+export default function LoginPage() {
+  const { data: session } = useSession();
+  const router = useRouter();
 
-  if (session?.user) {
-    redirect("/");
-  }
+  useEffect(() => {
+    if (session?.user) router.replace("/");
+  }, [session, router]);
 
   return (
     <div className="auth-shell">
@@ -23,25 +27,18 @@ export default async function LoginPage() {
           </p>
         </div>
 
-        <form
-          action={async () => {
-            "use server";
-            await signIn("google", { redirectTo: "/" });
-          }}
+        <button
+          onClick={() => signIn("google", { callbackUrl: "/" })}
+          className="primary-btn flex items-center justify-center gap-3"
         >
-          <button
-            type="submit"
-            className="primary-btn flex items-center justify-center gap-3"
+          <span
+            aria-hidden="true"
+            className="flex h-5 w-5 items-center justify-center rounded-full border border-black/10 bg-white text-sm font-bold text-[#4285f4]"
           >
-            <span
-              aria-hidden="true"
-              className="flex h-5 w-5 items-center justify-center rounded-full border border-black/10 bg-white text-sm font-bold text-[#4285f4]"
-            >
-              G
-            </span>
-            Continue with Google
-          </button>
-        </form>
+            G
+          </span>
+          Continue with Google
+        </button>
 
         <p className="text-xs text-gray-500">
           Only <span className="font-semibold">@mlrit.ac.in</span> accounts allowed
