@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 import FullScreenLoader from "@/components/FullScreenLoader";
+import { SchedulePageSkeleton } from "@/components/PageSkeleton";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const PERIODS = 6;
@@ -163,7 +164,7 @@ export default function SchedulePage() {
   }
 
   if (loading) {
-    return <FullScreenLoader label="Loading schedule..." />;
+    return <SchedulePageSkeleton />;
   }
 
   return (
