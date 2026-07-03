@@ -164,7 +164,12 @@ export default function SchedulePage() {
   }
 
   if (loading) {
-    return <SchedulePageSkeleton />;
+    return (
+      <div className="app-shell">
+        <SchedulePageSkeleton />
+        <BottomNav />
+      </div>
+    );
   }
 
   return (
