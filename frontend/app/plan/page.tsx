@@ -5,6 +5,20 @@ import BottomNav from "@/components/BottomNav";
 import { calendarPlan } from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 import FullScreenLoader from "@/components/FullScreenLoader";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Calendar,
+  TrendingUp,
+  Target,
+  BarChart3,
+  Clock,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  X,
+  Sparkles,
+} from "lucide-react";
 
 type CalendarStatus = "present" | "absent";
 
@@ -22,6 +36,77 @@ type CalendarResult = {
     reason: string;
   }>;
 };
+
+const INDIAN_HOLIDAYS: Record<string, string> = {
+  "2026-01-26": "Republic Day",
+  "2026-03-14": "Holi",
+  "2026-03-30": "Ramadan (Idul Fitr)",
+  "2026-04-02": "Ram Navami",
+  "2026-04-14": "Mahavir Jayanti",
+  "2026-04-21": "Good Friday",
+  "2026-05-01": "Labour Day",
+  "2026-05-06": "Buddha Purnima",
+  "2026-07-06": "Idul Juha (Bakrid)",
+  "2026-08-05": "Muharram",
+  "2026-08-15": "Independence Day",
+  "2026-08-27": "Janmashtami",
+  "2026-10-02": "Gandhi Jayanti",
+  "2026-10-05": "Milad-un-Nabi",
+  "2026-10-12": "Dussehra",
+  "2026-10-31": "Diwali",
+  "2026-11-01": "Diwali",
+  "2026-11-15": "Guru Nanak Jayanti",
+  "2026-12-25": "Christmas Day",
+};
+
+const INDIAN_HOLIDAYS_2025: Record<string, string> = {
+  "2025-01-26": "Republic Day",
+  "2025-03-14": "Holi",
+  "2025-03-31": "Ramadan (Idul Fitr)",
+  "2025-04-06": "Ram Navami",
+  "2025-04-10": "Mahavir Jayanti",
+  "2025-04-18": "Good Friday",
+  "2025-05-01": "Labour Day",
+  "2025-05-12": "Buddha Purnima",
+  "2025-06-12": "Idul Juha (Bakrid)",
+  "2025-07-03": "Muharram",
+  "2025-08-15": "Independence Day",
+  "2025-08-16": "Janmashtami",
+  "2025-09-05": "Milad-un-Nabi",
+  "2025-10-02": "Gandhi Jayanti",
+  "2025-10-07": "Dussehra",
+  "2025-10-22": "Diwali",
+  "2025-10-23": "Diwali",
+  "2025-11-05": "Guru Nanak Jayanti",
+  "2025-12-25": "Christmas Day",
+};
+
+const INDIAN_HOLIDAYS_2027: Record<string, string> = {
+  "2027-01-26": "Republic Day",
+  "2027-03-03": "Holi",
+  "2027-03-20": "Ramadan (Idul Fitr)",
+  "2027-03-23": "Ram Navami",
+  "2027-04-02": "Mahavir Jayanti",
+  "2027-05-01": "Labour Day",
+  "2027-04-26": "Buddha Purnima",
+  "2027-06-20": "Idul Juha (Bakrid)",
+  "2027-07-10": "Muharram",
+  "2027-08-15": "Independence Day",
+  "2027-08-26": "Janmashtami",
+  "2027-10-02": "Gandhi Jayanti",
+  "2027-09-15": "Milad-un-Nabi",
+  "2027-10-01": "Dussehra",
+  "2027-10-19": "Diwali",
+  "2027-10-20": "Diwali",
+  "2027-11-07": "Guru Nanak Jayanti",
+  "2027-12-25": "Christmas Day",
+};
+
+function getHolidaysForYear(year: number): Record<string, string> {
+  if (year === 2025) return INDIAN_HOLIDAYS_2025;
+  if (year === 2027) return INDIAN_HOLIDAYS_2027;
+  return INDIAN_HOLIDAYS;
+}
 
 function generateCalendarDays(date: Date): (number | null)[] {
   const year = date.getFullYear();
@@ -87,6 +172,8 @@ export default function PlanPage() {
 
   const [runningPrediction, setRunningPrediction] = useState(false);
   const [error, setError] = useState("");
+
+  const holidays = getHolidaysForYear(currentMonth.getFullYear());
 
   function previousMonth() {
     const today = new Date();
@@ -239,48 +326,54 @@ export default function PlanPage() {
 
   return (
     <div className="app-shell">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Plan My Bunks</h1>
-        <p className="text-sm text-gray-400 mt-1">
-          Select dates and predict your attendance.
-        </p>
+      <div className="flex items-center gap-3">
+        <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-blue-500/20 to-purple-600/20 border border-blue-500/20 flex items-center justify-center">
+          <Calendar className="w-5 h-5 text-blue-400" />
+        </div>
+        <div>
+          <h1 className="text-xl font-bold tracking-tight">Plan My Bunks</h1>
+          <p className="text-xs text-gray-400">
+            Select dates and predict your attendance.
+          </p>
+        </div>
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
-          {error}
+        <div className="flex items-center gap-2.5 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{error}</span>
         </div>
       )}
 
-      <div className="flex items-center justify-between px-2">
+      <div className="flex items-center justify-between px-1">
         <button
           type="button"
           onClick={previousMonth}
           disabled={!canGoPrevious}
-          className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 text-gray-300 hover:bg-white/10 transition disabled:opacity-40 disabled:hover:bg-white/5"
+          className="h-9 w-9 rounded-xl border border-white/10 bg-white/5 text-gray-300 hover:bg-white/10 transition disabled:opacity-40 disabled:hover:bg-white/5 flex items-center justify-center"
         >
-          ←
+          <ChevronLeft className="w-4 h-4" />
         </button>
 
-        <h2 className="text-lg font-semibold">{monthName}</h2>
+        <h2 className="text-base font-semibold">{monthName}</h2>
 
         <button
           type="button"
           onClick={nextMonth}
-          className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 text-gray-300 hover:bg-white/10 transition"
+          className="h-9 w-9 rounded-xl border border-white/10 bg-white/5 text-gray-300 hover:bg-white/10 transition flex items-center justify-center"
         >
-          →
+          <ChevronRight className="w-4 h-4" />
         </button>
       </div>
 
-      <div className="soft-card p-4">
-        <div className="grid grid-cols-7 gap-1">
+      <div className="glass-card p-3">
+        <div className="grid grid-cols-7 gap-0.5">
           {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => (
             <div
               key={day}
-              className="text-xs font-semibold text-gray-400 text-center py-2"
+              className="text-xs font-semibold text-gray-500 text-center py-1.5"
             >
-              {day}
+              {day.charAt(0)}
             </div>
           ))}
 
@@ -299,11 +392,15 @@ export default function PlanPage() {
             const status = selectedDates.get(dateStr);
             const isPast = isPastDateString(dateStr);
 
-            const today = new Date();
+            const holidayName = holidays[dateStr];
+            const isHoliday = !!holidayName;
+
             const isToday =
               today.getDate() === day &&
               today.getMonth() === currentMonth.getMonth() &&
               today.getFullYear() === currentMonth.getFullYear();
+
+            const isSunday = new Date(`${dateStr}T00:00:00`).getDay() === 0;
 
             return (
               <button
@@ -311,20 +408,27 @@ export default function PlanPage() {
                 type="button"
                 onClick={() => handleDateClick(day)}
                 disabled={isPast}
-                className={`aspect-square rounded-lg border transition flex flex-col items-center justify-center text-sm ${
-                  isSelected
+                title={holidayName || undefined}
+                className={`aspect-square rounded-lg transition-all flex flex-col items-center justify-center text-sm relative ${
+                  isHoliday && !isSelected
+                    ? "bg-green-500/15 text-green-300 border border-green-500/20"
+                    : isSelected
                     ? status === "present"
-                      ? "border-green-500/50 bg-green-500/15 text-green-200"
-                      : "border-red-500/50 bg-red-500/15 text-red-200"
+                      ? "bg-green-500/20 text-green-200 shadow-sm shadow-green-500/10"
+                      : "bg-red-500/20 text-red-200 shadow-sm shadow-red-500/10"
                     : isPast
-                    ? "border-white/5 bg-white/[0.02] text-gray-600 cursor-not-allowed"
-                    : "border-white/10 bg-white/5 text-white hover:bg-white/10"
-                } ${isToday ? "ring-2 ring-blue-500/50" : ""}`}
+                    ? "text-gray-700 cursor-not-allowed"
+                    : isSunday
+                    ? "text-gray-600"
+                    : "text-gray-300 hover:bg-white/5"
+                } ${isToday ? "ring-2 ring-blue-500/40" : ""}`}
               >
-                <span className="font-semibold">{day}</span>
-
+                <span className="font-semibold text-xs">{day}</span>
+                {isHoliday && !isSelected && (
+                  <Sparkles className="w-2.5 h-2.5 mt-0.5 text-green-400" />
+                )}
                 {isSelected && (
-                  <span className="text-xs mt-0.5">
+                  <span className="text-[8px] mt-0.5 leading-none">
                     {status === "present" ? "✓" : "✗"}
                   </span>
                 )}
@@ -343,9 +447,19 @@ export default function PlanPage() {
         type="button"
         onClick={handleRunPrediction}
         disabled={runningPrediction || selectedDates.size === 0}
-        className="primary-btn disabled:opacity-60"
+        className="primary-btn flex items-center justify-center gap-2 disabled:opacity-60"
       >
-        {runningPrediction ? "Calculating..." : "Run Prediction"}
+        {runningPrediction ? (
+          <>
+            <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+            Calculating...
+          </>
+        ) : (
+          <>
+            <BarChart3 className="w-4 h-4" />
+            Run Prediction
+          </>
+        )}
       </button>
 
       {calendarResult && <ResultsDisplay result={calendarResult} />}
@@ -375,6 +489,15 @@ export default function PlanPage() {
               )
             ) || undefined
           }
+          holidayName={
+            holidays[
+              formatDateString(
+                selectedDateForModal.getDate(),
+                selectedDateForModal.getMonth(),
+                selectedDateForModal.getFullYear()
+              )
+            ] || undefined
+          }
         />
       )}
     </div>
@@ -395,44 +518,56 @@ function SelectedDatesSummary({
   if (dateArray.length === 0) {
     return (
       <div className="glass-card p-4">
-        <p className="text-gray-400 text-sm text-center">
-          No dates selected yet.
-        </p>
+        <div className="flex items-center justify-center gap-2 text-gray-500 text-sm">
+          <Calendar className="w-4 h-4" />
+          <span>No dates selected yet. Tap a date to begin.</span>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="soft-card p-4 space-y-2">
-      <p className="text-sm font-semibold text-gray-300 mb-3">
-        Selected Dates
-      </p>
+    <div className="soft-card p-3">
+      <div className="flex items-center justify-between mb-2.5 px-0.5">
+        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+          Selected Dates
+        </p>
+        <span className="text-xs text-gray-500 bg-white/5 px-2 py-0.5 rounded-full">
+          {dateArray.length}
+        </span>
+      </div>
 
-      {dateArray.map(([dateStr, status]) => (
-        <div
-          key={dateStr}
-          className="flex items-center justify-between p-3 rounded-lg border border-white/10 bg-white/5"
-        >
-          <div>
-            <p className="text-sm font-medium">{formatDateDisplay(dateStr)}</p>
-            <p
-              className={`text-xs ${
-                status === "present" ? "text-green-300" : "text-red-300"
-              }`}
-            >
-              {status === "present" ? "✓ Present" : "✗ Absent"}
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => onRemove(dateStr)}
-            className="text-gray-400 hover:text-white transition text-lg font-bold"
+      <div className="flex flex-wrap gap-1.5">
+        {dateArray.map(([dateStr, status]) => (
+          <div
+            key={dateStr}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium transition ${
+              status === "present"
+                ? "bg-green-500/15 text-green-300 border border-green-500/20"
+                : "bg-red-500/15 text-red-300 border border-red-500/20"
+            }`}
           >
-            ×
-          </button>
-        </div>
-      ))}
+            {status === "present" ? (
+              <CheckCircle2 className="w-3 h-3" />
+            ) : (
+              <XCircle className="w-3 h-3" />
+            )}
+            <span>
+              {new Date(`${dateStr}T00:00:00`).toLocaleDateString("en-GB", {
+                day: "numeric",
+                month: "short",
+              })}
+            </span>
+            <button
+              type="button"
+              onClick={() => onRemove(dateStr)}
+              className="ml-0.5 hover:text-white transition"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -444,62 +579,78 @@ function ResultsDisplay({ result }: { result: CalendarResult }) {
     return "No change";
   }
 
+  const overallIsPositive = result.change_overall >= 0;
+  const avgIsPositive = result.change_avg >= 0;
+
   return (
-    <div className="glass-card p-4 space-y-3">
-      <p className="font-semibold text-gray-200">{result.scenario_label}</p>
+    <div className="glass-card p-4 space-y-4">
+      <div className="flex items-center gap-2.5">
+        <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-blue-500/20 to-purple-600/20 border border-blue-500/20 flex items-center justify-center">
+          <TrendingUp className="w-4 h-4 text-blue-400" />
+        </div>
+        <div>
+          <p className="font-semibold text-sm text-gray-200">
+            {result.scenario_label}
+          </p>
+          <p className="text-xs text-gray-500">Prediction Results</p>
+        </div>
+      </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <StatCard
-          title="New Overall"
-          value={`${result.new_overall.toFixed(2)}%`}
-          sub={formatChange(result.change_overall)}
-        />
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Target className="w-3.5 h-3.5 text-blue-400" />
+            <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+              Overall
+            </p>
+          </div>
+          <p className="text-xl font-bold">{result.new_overall.toFixed(1)}%</p>
+          <div className="flex items-center gap-1 mt-1">
+            <span
+              className={`text-[10px] font-medium ${
+                overallIsPositive ? "text-green-400" : "text-red-400"
+              }`}
+            >
+              {result.change_overall > 0 ? "↑" : "↓"}{" "}
+              {Math.abs(result.change_overall).toFixed(1)}%
+            </span>
+            <span className="text-[10px] text-gray-500">from current</span>
+          </div>
+        </div>
 
-        <StatCard
-          title="Overall Change"
-          value={`${
-            result.change_overall > 0 ? "+" : ""
-          }${result.change_overall.toFixed(2)}%`}
-        />
-
-        <StatCard
-          title="New Average"
-          value={`${result.new_avg.toFixed(2)}%`}
-          sub={formatChange(result.change_avg)}
-        />
-
-        <StatCard
-          title="Average Change"
-          value={`${
-            result.change_avg > 0 ? "+" : ""
-          }${result.change_avg.toFixed(2)}%`}
-        />
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+          <div className="flex items-center gap-1.5 mb-2">
+            <BarChart3 className="w-3.5 h-3.5 text-purple-400" />
+            <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+              Average
+            </p>
+          </div>
+          <p className="text-xl font-bold">{result.new_avg.toFixed(1)}%</p>
+          <div className="flex items-center gap-1 mt-1">
+            <span
+              className={`text-[10px] font-medium ${
+                avgIsPositive ? "text-green-400" : "text-red-400"
+              }`}
+            >
+              {result.change_avg > 0 ? "↑" : "↓"}{" "}
+              {Math.abs(result.change_avg).toFixed(1)}%
+            </span>
+            <span className="text-[10px] text-gray-500">from current</span>
+          </div>
+        </div>
       </div>
 
-      <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-        <p className="text-xs text-gray-400">Simulated Sessions</p>
-        <p className="text-2xl font-bold mt-1">
-          {result.simulated_sessions}
-        </p>
+      <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 flex items-center gap-3">
+        <div className="h-9 w-9 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
+          <Clock className="w-4 h-4 text-blue-400" />
+        </div>
+        <div>
+          <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">
+            Simulated Sessions
+          </p>
+          <p className="text-xl font-bold">{result.simulated_sessions}</p>
+        </div>
       </div>
-    </div>
-  );
-}
-
-function StatCard({
-  title,
-  value,
-  sub,
-}: {
-  title: string;
-  value: string;
-  sub?: string;
-}) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-      <p className="text-xs text-gray-400">{title}</p>
-      <p className="text-lg font-bold mt-1">{value}</p>
-      {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
     </div>
   );
 }
@@ -512,18 +663,21 @@ function SkippedDatesDisplay({
   if (!skipped || skipped.length === 0) return null;
 
   return (
-    <div className="soft-card p-4 space-y-2">
-      <p className="text-sm font-semibold text-gray-300 mb-3">
-        ⚠️ Skipped Dates
-      </p>
+    <div className="soft-card p-3 space-y-2">
+      <div className="flex items-center gap-2 px-0.5">
+        <AlertTriangle className="w-4 h-4 text-amber-400" />
+        <p className="text-xs font-semibold text-amber-300 uppercase tracking-wider">
+          Skipped Dates
+        </p>
+      </div>
 
       {skipped.map(({ date, reason }) => (
         <div
           key={`${date}-${reason}`}
-          className="flex items-center justify-between gap-3 text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5"
+          className="flex items-center justify-between gap-3 text-xs px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.03]"
         >
-          <p className="text-gray-300">{formatDateDisplay(date)}</p>
-          <p className="text-xs text-gray-400 text-right">{reason}</p>
+          <span className="text-gray-300">{formatDateDisplay(date)}</span>
+          <span className="text-gray-500 text-right">{reason}</span>
         </div>
       ))}
     </div>
@@ -537,6 +691,7 @@ function DateSelectionModal({
   onAbsent,
   onClear,
   currentStatus,
+  holidayName,
 }: {
   date: Date;
   onClose: () => void;
@@ -544,16 +699,23 @@ function DateSelectionModal({
   onAbsent: () => void;
   onClear: () => void;
   currentStatus?: CalendarStatus;
+  holidayName?: string;
 }) {
   return (
     <>
-      <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
+      <div className="fixed inset-0 bg-black/60 z-40" onClick={onClose} />
 
-      <div className="fixed bottom-0 left-0 right-0 z-50 rounded-t-3xl border-t border-white/10 bg-[#0f172a] p-6 space-y-4">
-        <div className="text-center">
-          <p className="text-gray-400 text-sm">Selected Date</p>
+      <div className="fixed bottom-0 left-0 right-0 z-50 rounded-t-3xl border-t border-white/[0.06] bg-[#0a0e17] p-5 pb-8 space-y-3 animate-slide-up">
+        <div className="flex justify-center mb-1">
+          <div className="w-10 h-1 rounded-full bg-white/20" />
+        </div>
 
-          <p className="text-xl font-semibold mt-1">
+        <div className="text-center mb-2">
+          <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">
+            Selected Date
+          </p>
+
+          <p className="text-lg font-bold mt-1">
             {date.toLocaleDateString("en-GB", {
               day: "numeric",
               month: "long",
@@ -561,49 +723,60 @@ function DateSelectionModal({
             })}
           </p>
 
+          <p className="text-gray-500 text-xs mt-1">
+            {date.toLocaleDateString("en-GB", { weekday: "long" })}
+          </p>
+
+          {holidayName && (
+            <div className="inline-flex items-center gap-1.5 mt-2 px-3 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-xs text-green-300">
+              <Sparkles className="w-3 h-3" />
+              {holidayName}
+            </div>
+          )}
+
           {currentStatus && (
-            <p className="text-xs text-gray-400 mt-2">
+            <div className="inline-flex items-center gap-1.5 mt-2 px-3 py-1 rounded-full bg-white/5 text-xs text-gray-400">
               Currently:{" "}
-              <span className="font-semibold">
-                {currentStatus === "present" ? "Present" : "Absent"}
+              <span
+                className={`font-semibold ${
+                  currentStatus === "present"
+                    ? "text-green-400"
+                    : "text-red-400"
+                }`}
+              >
+                {currentStatus === "present" ? "Present ✓" : "Absent ✗"}
               </span>
-            </p>
+            </div>
           )}
         </div>
 
         <button
           type="button"
           onClick={onPresent}
-          className="w-full px-4 py-3 rounded-lg border border-green-500/30 bg-green-500/20 text-green-200 font-semibold hover:bg-green-500/30 transition"
+          className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-green-500/20 bg-green-500/15 text-green-300 font-semibold hover:bg-green-500/25 transition"
         >
-          Mark Present ✓
+          <CheckCircle2 className="w-4 h-4" />
+          Mark Present
         </button>
 
         <button
           type="button"
           onClick={onAbsent}
-          className="w-full px-4 py-3 rounded-lg border border-red-500/30 bg-red-500/20 text-red-200 font-semibold hover:bg-red-500/30 transition"
+          className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-red-500/20 bg-red-500/15 text-red-300 font-semibold hover:bg-red-500/25 transition"
         >
-          Mark Absent ✗
+          <XCircle className="w-4 h-4" />
+          Mark Absent
         </button>
 
         {currentStatus && (
           <button
             type="button"
             onClick={onClear}
-            className="w-full text-gray-400 hover:text-white transition py-2 text-sm font-medium"
+            className="w-full text-gray-500 hover:text-gray-300 transition py-2 text-sm font-medium"
           >
             Clear Selection
           </button>
         )}
-
-        <button
-          type="button"
-          onClick={onClose}
-          className="w-full text-gray-400 text-sm py-2 font-medium"
-        >
-          Close
-        </button>
       </div>
     </>
   );
