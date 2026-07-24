@@ -7,7 +7,7 @@ import { clearAllUserData, updateUser } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
 import PushNotificationSettings from "@/components/PushNotificationSettings";
 import { mutateUser, useAppUser } from "@/lib/user";
-import { ChevronRight, UserRound } from "lucide-react";
+import { ChevronDown, ChevronRight, UserRound, Pencil, LogOut, Trash2 } from "lucide-react";
 
 type EditField = "name" | "college" | "branch" | "semester" | "section" | null;
 
@@ -33,8 +33,8 @@ export default function ProfilePage() {
   const [editingField, setEditingField] = useState<EditField>(null);
   const [editValue, setEditValue] = useState("");
 
-  // The shared user cache already carries every profile field, so seed the form
-  // from it directly instead of firing a redundant /users/{id} request.
+  const [expandedSection, setExpandedSection] = useState<string | null>(null);
+
   useEffect(() => {
     if (!appUser) return;
 
@@ -74,8 +74,6 @@ export default function ProfilePage() {
       setMessage("");
 
       await updateUser(form, appUser.id);
-      // Keep the shared user cache in sync so other screens reflect the edit
-      // without another network round-trip.
       mutateUser(form);
       setMessage("Profile updated successfully.");
     } catch (e) {
@@ -101,6 +99,10 @@ export default function ProfilePage() {
     } finally {
       setClearing(false);
     }
+  }
+
+  function toggleSection(name: string) {
+    setExpandedSection((prev) => (prev === name ? null : name));
   }
 
   if (loadingUser) {
@@ -163,68 +165,84 @@ export default function ProfilePage() {
           </div>
         </div>
 
-
-
         <PushNotificationSettings userId={appUser.id} />
 
-        <div className="space-y-3">
-          <ProfileRow
-            label="Name"
-            value={form.name}
-            onClick={() => openEdit("name", form.name)}
-          />
-
-          <ProfileRow
-            label="College"
-            value={form.college}
-            onClick={() => openEdit("college", form.college)}
-          />
-
-          <div className="grid grid-cols-2 gap-3">
+        <AccordionSection
+          title="Edit Profile"
+          icon={<Pencil className="w-4 h-4" />}
+          isOpen={expandedSection === "edit"}
+          onToggle={() => toggleSection("edit")}
+        >
+          <div className="space-y-3 mt-3">
             <ProfileRow
-              label="Branch"
-              value={form.branch}
-              onClick={() => openEdit("branch", form.branch)}
+              label="Name"
+              value={form.name}
+              onClick={() => openEdit("name", form.name)}
             />
+
             <ProfileRow
-              label="Semester"
-              value={form.semester}
-              onClick={() => openEdit("semester", form.semester)}
+              label="College"
+              value={form.college}
+              onClick={() => openEdit("college", form.college)}
             />
+
+            <div className="grid grid-cols-2 gap-3">
+              <ProfileRow
+                label="Branch"
+                value={form.branch}
+                onClick={() => openEdit("branch", form.branch)}
+              />
+              <ProfileRow
+                label="Semester"
+                value={form.semester}
+                onClick={() => openEdit("semester", form.semester)}
+              />
+            </div>
+
+            <ProfileRow
+              label="Section"
+              value={form.section}
+              onClick={() => openEdit("section", form.section)}
+            />
+
+            <button
+              type="button"
+              onClick={handleSaveProfile}
+              disabled={saving}
+              className="primary-btn disabled:opacity-60 mt-2"
+            >
+              {saving ? "Updating..." : "Update Profile"}
+            </button>
           </div>
+        </AccordionSection>
 
-          <ProfileRow
-            label="Section"
-            value={form.section}
-            onClick={() => openEdit("section", form.section)}
-          />
-        </div>
-
-        <button
-          type="button"
-          onClick={handleSaveProfile}
-          disabled={saving}
-          className="primary-btn disabled:opacity-60"
+        <AccordionSection
+          title="Account"
+          icon={<LogOut className="w-4 h-4" />}
+          isOpen={expandedSection === "account"}
+          onToggle={() => toggleSection("account")}
         >
-          {saving ? "Updating..." : "Update Profile"}
-        </button>
+          <div className="space-y-3 mt-3">
+            <button
+              type="button"
+              onClick={() => setShowClearModal(true)}
+              disabled={clearing}
+              className="w-full flex items-center justify-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 font-medium text-red-200 hover:bg-red-500/15 active:scale-[0.99] transition disabled:opacity-60"
+            >
+              <Trash2 className="w-4 h-4" />
+              {clearing ? "Clearing..." : "Clear All Data"}
+            </button>
 
-        <button
-          type="button"
-          onClick={() => setShowClearModal(true)}
-          disabled={clearing}
-          className="w-full rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 font-medium text-red-200 hover:bg-red-500/15 active:scale-[0.99] transition disabled:opacity-60"
-        >
-          {clearing ? "Clearing..." : "Clear All Data"}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => signOut({ callbackUrl: "/login" })}
-          className="secondary-btn"
-        >
-          Sign Out
-        </button>
+            <button
+              type="button"
+              onClick={() => signOut({ callbackUrl: "/login" })}
+              className="secondary-btn flex items-center justify-center gap-2"
+            >
+              <LogOut className="w-4 h-4" />
+              Sign Out
+            </button>
+          </div>
+        </AccordionSection>
 
         <BottomNav />
       </div>
@@ -299,6 +317,41 @@ export default function ProfilePage() {
   );
 }
 
+function AccordionSection({
+  title,
+  icon,
+  isOpen,
+  onToggle,
+  children,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  isOpen: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="glass-card overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-4 py-3.5 text-left transition hover:bg-white/5"
+      >
+        <div className="flex items-center gap-2.5">
+          <span className="text-[#8ecdf8]">{icon}</span>
+          <span className="font-semibold text-sm">{title}</span>
+        </div>
+        <ChevronDown
+          className={`w-4 h-4 text-gray-400 transition-transform ${
+            isOpen ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+      {isOpen && <div className="px-4 pb-4">{children}</div>}
+    </div>
+  );
+}
+
 function ProfileRow({
   label,
   value,
@@ -311,14 +364,14 @@ function ProfileRow({
   return (
     <div
       onClick={onClick}
-      className="glass-card px-4 py-4 flex items-center justify-between cursor-pointer hover:bg-white/10 transition"
+      className="flex items-center justify-between px-3 py-3 rounded-lg border border-white/[0.06] bg-white/[0.03] cursor-pointer hover:bg-white/5 transition"
     >
       <div>
         <p className="text-xs text-gray-400">{label}</p>
-        <p className="text-base font-semibold mt-1">{value || "-"}</p>
+        <p className="text-base font-semibold mt-0.5">{value || "-"}</p>
       </div>
 
-      <ChevronRight size={18} className="text-gray-400" />
+      <ChevronRight size={16} className="text-gray-500" />
     </div>
   );
 }
