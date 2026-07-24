@@ -214,44 +214,6 @@ export default function SchedulePage() {
             </div>
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <div className="section-title">Subjects</div>
-            <Link
-              href="/subjects"
-              className="rounded-full border border-[#2f3336] px-3 py-1.5 text-xs font-bold text-[#1d9bf0]"
-            >
-              Manage
-            </Link>
-          </div>
-
-          <div className="glass-card p-3">
-            <div className="flex gap-2 overflow-x-auto pb-1">
-              {lowestSubjects.map((subject) => {
-                const percentage =
-                  subject.total_classes > 0
-                    ? (subject.attended_classes / subject.total_classes) * 100
-                    : 0;
-
-                return (
-                  <div
-                    key={subject.id}
-                    className="min-w-[190px] rounded-xl border border-[#2f3336] bg-black p-3"
-                  >
-                    <p className="truncate text-sm font-bold">
-                      {subject.subject_name}
-                    </p>
-                    <p className="mt-2 text-xl font-black">
-                      {percentage.toFixed(1)}%
-                    </p>
-                    <p className="mt-1 text-xs text-[#71767b]">
-                      {subject.attended_classes}/{subject.total_classes}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
           <div className="section-title">Timetable</div>
 
           <div className="grid grid-cols-2 gap-3">
