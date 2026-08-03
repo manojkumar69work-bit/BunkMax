@@ -43,4 +43,7 @@ services:
       # Secrets below must be set in the dashboard, NOT committed here:
       #   DATABASE_URL, BACKEND_API_SECRET, ADMIN_API_SECRET,
       #   FRONTEND_URL, ALLOWED_ORIGINS, FIREBASE_SERVICE_ACCOUNT_FILE,
-      #   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET
+      #   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET,
+      #   ERP_CRED_KEY  (Fernet key encrypting stored vmedulife passwords;
+      #                  generate: python -c "from cryptography.fernet import
+      #                  Fernet; print(Fernet.generate_key().decode())")

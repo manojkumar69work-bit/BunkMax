@@ -13,3 +13,4 @@ backend/uploads/
 backend/source/
 frontend/venv/
 frontend/source/
+*.log
