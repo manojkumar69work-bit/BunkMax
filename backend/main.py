@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field, model_validator
 import razorpay
 
 from push_notifications import send_push_to_tokens
+import crypto_util
+import vmedulife
 
 razorpay_client = None
 if os.getenv("RAZORPAY_KEY_ID") and os.getenv("RAZORPAY_KEY_SECRET"):
@@ -291,6 +293,13 @@ def require_notification_cron_secret(
 class ERPImportPayload(BaseModel):
     subjects: list[dict[str, Any]]
     attendance: dict[str, Any]
+
+
+class ERPSyncPayload(BaseModel):
+    erp_username: str = Field(..., min_length=1, max_length=100)
+    erp_password: str = Field(..., min_length=1, max_length=200)
+    institute_slug: str = Field(default=vmedulife.DEFAULT_SLUG, max_length=100)
+    save_credentials: bool = True
 
 
 class MarkAttendance(BaseModel):
@@ -1216,6 +1225,19 @@ def init_db(_: None = Depends(require_admin_db_routes_enabled)):
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS erp_credentials (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    erp_username TEXT NOT NULL,
+                    erp_password_enc TEXT NOT NULL,
+                    institute_slug TEXT DEFAULT 'mlrit-hyderabad',
+                    last_synced_at TIMESTAMPTZ,
+                    last_sync_status TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
                 ON users (LOWER(email));
             """)
@@ -1402,6 +1424,19 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
                     sent_date DATE NOT NULL,
                     sent_at TIMESTAMPTZ DEFAULT NOW(),
                     UNIQUE(user_id, notification_type, sent_date)
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS erp_credentials (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    erp_username TEXT NOT NULL,
+                    erp_password_enc TEXT NOT NULL,
+                    institute_slug TEXT DEFAULT 'mlrit-hyderabad',
+                    last_synced_at TIMESTAMPTZ,
+                    last_sync_status TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
 
@@ -2196,6 +2231,65 @@ def send_evening_notifications(
         )
 
 
+def _upsert_erp_subjects(cur, user_id, subjects, attendance) -> int:
+    """
+    Upsert ERP-shaped attendance into the subjects table using an open cursor.
+
+    Shared by the copy-paste importer and the server-side portal sync. Expects
+    `subjects` as [{subjectid, subject_name}] and `attendance` as
+    {subjectid: {totalsessions, presentSessionsCount}}. Returns the count
+    written.
+    """
+    imported = 0
+
+    for subject in subjects:
+        subject_id = clean_text(subject.get("subjectid"))
+        subject_name = clean_text(subject.get("subject_name"))
+
+        if not subject_id or not subject_name:
+            continue
+
+        stats = attendance.get(subject_id, {}) or {}
+
+        try:
+            total = int(stats.get("totalsessions", 0) or 0)
+            present = int(stats.get("presentSessionsCount", 0) or 0)
+        except Exception:
+            continue
+
+        if total < 0 or present < 0:
+            continue
+
+        if present > total:
+            present = total
+
+        cur.execute("""
+            INSERT INTO subjects (
+                user_id,
+                subject_name,
+                attended_classes,
+                total_classes,
+                required_percentage
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, subject_name)
+            DO UPDATE SET
+                attended_classes = EXCLUDED.attended_classes,
+                total_classes = EXCLUDED.total_classes,
+                required_percentage = EXCLUDED.required_percentage
+        """, (
+            user_id,
+            subject_name,
+            present,
+            total,
+            75,
+        ))
+
+        imported += 1
+
+    return imported
+
+
 @app.post("/users/{user_id}/import-attendance")
 def import_attendance(
     user_id: int,
@@ -2208,53 +2302,9 @@ def import_attendance(
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            imported = 0
-
-            for subject in payload.subjects:
-                subject_id = clean_text(subject.get("subjectid"))
-                subject_name = clean_text(subject.get("subject_name"))
-
-                if not subject_id or not subject_name:
-                    continue
-
-                stats = payload.attendance.get(subject_id, {})
-
-                try:
-                    total = int(stats.get("totalsessions", 0) or 0)
-                    present = int(stats.get("presentSessionsCount", 0) or 0)
-                except Exception:
-                    continue
-
-                if total < 0 or present < 0:
-                    continue
-
-                if present > total:
-                    present = total
-
-                cur.execute("""
-                    INSERT INTO subjects (
-                        user_id,
-                        subject_name,
-                        attended_classes,
-                        total_classes,
-                        required_percentage
-                    )
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id, subject_name)
-                    DO UPDATE SET
-                        attended_classes = EXCLUDED.attended_classes,
-                        total_classes = EXCLUDED.total_classes,
-                        required_percentage = EXCLUDED.required_percentage
-                """, (
-                    user_id,
-                    subject_name,
-                    present,
-                    total,
-                    75,
-                ))
-
-                imported += 1
-
+            imported = _upsert_erp_subjects(
+                cur, user_id, payload.subjects, payload.attendance
+            )
             conn.commit()
 
         return {
@@ -2267,6 +2317,269 @@ def import_attendance(
         raise HTTPException(status_code=500, detail="Import failed")
     finally:
         conn.close()
+
+
+# ─────────────────────────── ERP portal sync ───────────────────────────
+# Server-side login to the college portal (vmedulife) so students don't have
+# to copy-paste. Credentials can optionally be stored (Fernet-encrypted) for
+# one-tap re-sync and the daily auto-sync cron.
+
+def _ensure_erp_credentials_table(cur) -> None:
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS erp_credentials (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            erp_username TEXT NOT NULL,
+            erp_password_enc TEXT NOT NULL,
+            institute_slug TEXT DEFAULT 'mlrit-hyderabad',
+            last_synced_at TIMESTAMPTZ,
+            last_sync_status TEXT DEFAULT '',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    """)
+
+
+def _run_erp_sync(user_id: int, username: str, password: str, slug: str,
+                  *, save_credentials: bool) -> dict:
+    """Fetch from the portal, upsert subjects, optionally persist credentials."""
+    result = vmedulife.fetch_attendance(username, password, slug)
+    subjects = result["subjects"]
+    attendance = result["attendance"]
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            imported = _upsert_erp_subjects(cur, user_id, subjects, attendance)
+
+            if save_credentials:
+                _ensure_erp_credentials_table(cur)
+                cur.execute("""
+                    INSERT INTO erp_credentials (
+                        user_id, erp_username, erp_password_enc, institute_slug,
+                        last_synced_at, last_sync_status, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, NOW(), %s, NOW())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        erp_username = EXCLUDED.erp_username,
+                        erp_password_enc = EXCLUDED.erp_password_enc,
+                        institute_slug = EXCLUDED.institute_slug,
+                        last_synced_at = NOW(),
+                        last_sync_status = EXCLUDED.last_sync_status,
+                        updated_at = NOW()
+                """, (
+                    user_id,
+                    username.strip(),
+                    crypto_util.encrypt(password),
+                    slug,
+                    "ok",
+                ))
+            else:
+                # If they previously saved but now opt out, still refresh the
+                # last_synced marker when a row exists.
+                _ensure_erp_credentials_table(cur)
+                cur.execute(
+                    "UPDATE erp_credentials SET last_synced_at = NOW(), "
+                    "last_sync_status = 'ok', updated_at = NOW() WHERE user_id = %s",
+                    (user_id,),
+                )
+
+            conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "message": (
+            f"{imported} subjects synced from the portal."
+            if imported
+            else "Signed in, but no attendance found yet (no classes conducted)."
+        ),
+        "subjects_imported": imported,
+        "average": result.get("average", 0),
+        "student": result.get("student", {}),
+        "credentials_saved": save_credentials,
+    }
+
+
+@app.post("/users/{user_id}/erp-sync")
+def erp_sync(
+    user_id: int,
+    payload: ERPSyncPayload,
+    _: None = Depends(require_service_secret),
+):
+    if payload.save_credentials and not crypto_util.is_configured():
+        raise HTTPException(
+            status_code=500,
+            detail="Credential storage is not configured on the server.",
+        )
+    try:
+        return _run_erp_sync(
+            user_id,
+            payload.erp_username,
+            payload.erp_password,
+            payload.institute_slug or vmedulife.DEFAULT_SLUG,
+            save_credentials=payload.save_credentials,
+        )
+    except vmedulife.ERPError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message)
+    except crypto_util.CredentialCryptoError:
+        logger.exception("ERP credential encryption failed for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Could not securely store credentials.")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("ERP sync failed for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Portal sync failed.")
+
+
+@app.post("/users/{user_id}/erp-resync")
+def erp_resync(user_id: int, _: None = Depends(require_service_secret)):
+    """Re-sync using stored credentials — no password in the request."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ensure_erp_credentials_table(cur)
+            cur.execute(
+                "SELECT erp_username, erp_password_enc, institute_slug "
+                "FROM erp_credentials WHERE user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            conn.commit()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No saved portal login found.")
+
+    try:
+        password = crypto_util.decrypt(row["erp_password_enc"])
+    except crypto_util.CredentialCryptoError:
+        logger.exception("Could not decrypt ERP credentials for user %s", user_id)
+        raise HTTPException(
+            status_code=409,
+            detail="Saved login could not be read. Please sign in again.",
+        )
+
+    try:
+        return _run_erp_sync(
+            user_id,
+            row["erp_username"],
+            password,
+            row.get("institute_slug") or vmedulife.DEFAULT_SLUG,
+            save_credentials=True,
+        )
+    except vmedulife.ERPError as exc:
+        _mark_erp_sync_status(user_id, f"error: {exc.message}"[:200])
+        raise HTTPException(status_code=exc.status, detail=exc.message)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("ERP resync failed for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Portal sync failed.")
+
+
+def _mark_erp_sync_status(user_id: int, status: str) -> None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ensure_erp_credentials_table(cur)
+            cur.execute(
+                "UPDATE erp_credentials SET last_sync_status = %s, updated_at = NOW() "
+                "WHERE user_id = %s",
+                (status, user_id),
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to record ERP sync status for user %s", user_id)
+    finally:
+        conn.close()
+
+
+@app.get("/users/{user_id}/erp-status")
+def erp_status(user_id: int, _: None = Depends(require_service_secret)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ensure_erp_credentials_table(cur)
+            cur.execute(
+                "SELECT erp_username, institute_slug, last_synced_at, last_sync_status "
+                "FROM erp_credentials WHERE user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            conn.commit()
+    finally:
+        conn.close()
+
+    if not row:
+        return {"saved": False}
+
+    last_synced = row.get("last_synced_at")
+    return {
+        "saved": True,
+        "erp_username": row.get("erp_username"),
+        "institute_slug": row.get("institute_slug"),
+        "last_synced_at": last_synced.isoformat() if last_synced else None,
+        "last_sync_status": row.get("last_sync_status") or "",
+    }
+
+
+@app.delete("/users/{user_id}/erp-credentials")
+def delete_erp_credentials(user_id: int, _: None = Depends(require_service_secret)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ensure_erp_credentials_table(cur)
+            cur.execute("DELETE FROM erp_credentials WHERE user_id = %s", (user_id,))
+            conn.commit()
+    finally:
+        conn.close()
+    return {"message": "Saved portal login removed."}
+
+
+@app.get("/cron/erp/sync-all")
+@app.post("/cron/erp/sync-all")
+def cron_erp_sync_all(_: None = Depends(require_notification_cron_secret)):
+    """Daily best-effort re-sync of every student with saved credentials."""
+    if not crypto_util.is_configured():
+        raise HTTPException(status_code=500, detail="Credential storage not configured.")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ensure_erp_credentials_table(cur)
+            cur.execute(
+                "SELECT user_id, erp_username, erp_password_enc, institute_slug "
+                "FROM erp_credentials"
+            )
+            rows = cur.fetchall()
+            conn.commit()
+    finally:
+        conn.close()
+
+    synced = 0
+    failed = 0
+    for row in rows:
+        uid = row["user_id"]
+        try:
+            password = crypto_util.decrypt(row["erp_password_enc"])
+            _run_erp_sync(
+                uid,
+                row["erp_username"],
+                password,
+                row.get("institute_slug") or vmedulife.DEFAULT_SLUG,
+                save_credentials=True,
+            )
+            synced += 1
+        except vmedulife.ERPError as exc:
+            failed += 1
+            _mark_erp_sync_status(uid, f"error: {exc.message}"[:200])
+        except Exception:
+            failed += 1
+            logger.exception("Cron ERP sync failed for user %s", uid)
+            _mark_erp_sync_status(uid, "error: sync failed")
+
+    return {"synced": synced, "failed": failed, "total": len(rows)}
 
 
 @app.get("/users/{user_id}/subjects")
