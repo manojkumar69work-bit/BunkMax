@@ -1,9 +1,31 @@
 "use client";
 
-import { useState } from "react";
-import { importAttendance } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import {
+  importAttendance,
+  erpSync,
+  erpResync,
+  getErpStatus,
+  deleteErpCredentials,
+  type ErpStatus,
+  type ErpSyncResult,
+} from "@/lib/api";
 import { useAppUser } from "@/lib/user";
 import BottomNav from "@/components/BottomNav";
+
+function relativeTime(iso?: string | null) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hr ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
 
 type PreviewRow = {
   subjectid: string;
@@ -227,6 +249,107 @@ export default function ImportPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  // ── ERP portal sync ──
+  const [erpId, setErpId] = useState("");
+  const [erpPass, setErpPass] = useState("");
+  const [showPass, setShowPass] = useState(false);
+  const [keepSynced, setKeepSynced] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [erpStatus, setErpStatus] = useState<ErpStatus | null>(null);
+  const [erpMessage, setErpMessage] = useState("");
+  const [erpError, setErpError] = useState("");
+  const [reLogin, setReLogin] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+
+  const refreshErpStatus = useCallback(async () => {
+    if (!appUser) return;
+    try {
+      setErpStatus(await getErpStatus(appUser.id));
+    } catch {
+      /* status is best-effort; ignore */
+    }
+  }, [appUser]);
+
+  useEffect(() => {
+    refreshErpStatus();
+  }, [refreshErpStatus]);
+
+  function applySyncResult(result: ErpSyncResult) {
+    setErpError("");
+    setErpMessage(
+      result.subjects_imported > 0
+        ? `${result.message}${
+            result.average ? ` Average attendance ${result.average}%.` : ""
+          }`
+        : result.message
+    );
+    setReLogin(false);
+    setErpPass("");
+    refreshErpStatus();
+  }
+
+  async function handlePortalSync() {
+    if (!appUser) return;
+    if (!erpId.trim() || !erpPass) {
+      setErpError("Enter your ERP ID and password.");
+      return;
+    }
+
+    setSyncing(true);
+    setErpError("");
+    setErpMessage("");
+
+    try {
+      const result = await erpSync(
+        {
+          erp_username: erpId.trim(),
+          erp_password: erpPass,
+          save_credentials: keepSynced,
+        },
+        appUser.id
+      );
+      applySyncResult(result);
+    } catch (e) {
+      setErpError(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function handleResync() {
+    if (!appUser) return;
+
+    setSyncing(true);
+    setErpError("");
+    setErpMessage("");
+
+    try {
+      const result = await erpResync(appUser.id);
+      applySyncResult(result);
+    } catch (e) {
+      setErpError(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function handleRemoveSaved() {
+    if (!appUser) return;
+    setSyncing(true);
+    setErpError("");
+    setErpMessage("");
+    try {
+      await deleteErpCredentials(appUser.id);
+      setErpStatus({ saved: false });
+      setReLogin(false);
+      setErpMessage("Saved portal login removed.");
+    } catch (e) {
+      setErpError(e instanceof Error ? e.message : "Could not remove login");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   function handleParse() {
     try {
       setError("");
@@ -330,6 +453,139 @@ export default function ImportPage() {
     <div className="app-shell space-y-4">
       <h1 className="text-2xl font-bold">Import from ERP</h1>
 
+      {/* ── Sync from Portal (server-side) ── */}
+      <div className="glass-card p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <p className="font-semibold">Sync from Portal</p>
+          <span className="text-xs text-gray-400">vmedulife</span>
+        </div>
+
+        {erpStatus?.saved && !reLogin ? (
+          <>
+            <p className="text-sm text-gray-300">
+              Signed in as{" "}
+              <span className="font-medium">{erpStatus.erp_username}</span>
+              {erpStatus.last_synced_at && (
+                <> · last synced {relativeTime(erpStatus.last_synced_at)}</>
+              )}
+            </p>
+
+            <button
+              onClick={handleResync}
+              disabled={syncing}
+              className="primary-btn"
+            >
+              {syncing ? "Syncing..." : "Sync now"}
+            </button>
+
+            <div className="flex gap-3 text-xs">
+              <button
+                onClick={() => {
+                  setReLogin(true);
+                  setErpId(erpStatus.erp_username || "");
+                  setErpMessage("");
+                  setErpError("");
+                }}
+                className="underline"
+              >
+                Use a different login
+              </button>
+              <button
+                onClick={handleRemoveSaved}
+                disabled={syncing}
+                className="underline text-red-300"
+              >
+                Remove saved login
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-400">
+              Enter your college portal login and we&apos;ll pull your
+              attendance automatically.
+            </p>
+
+            <input
+              className="input-ui"
+              value={erpId}
+              onChange={(e) => setErpId(e.target.value)}
+              placeholder="ERP ID (e.g. STMLRIT24728)"
+              autoCapitalize="characters"
+              autoComplete="username"
+            />
+
+            <div className="flex gap-2">
+              <input
+                className="input-ui flex-1"
+                type={showPass ? "text" : "password"}
+                value={erpPass}
+                onChange={(e) => setErpPass(e.target.value)}
+                placeholder="Portal password"
+                autoComplete="current-password"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handlePortalSync();
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPass((v) => !v)}
+                className="rounded-xl border border-white/10 bg-white/5 px-3 text-sm"
+              >
+                {showPass ? "Hide" : "Show"}
+              </button>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input
+                type="checkbox"
+                checked={keepSynced}
+                onChange={(e) => setKeepSynced(e.target.checked)}
+              />
+              Keep me synced (save login securely for auto-sync)
+            </label>
+
+            <button
+              onClick={handlePortalSync}
+              disabled={syncing}
+              className="primary-btn"
+            >
+              {syncing ? "Signing in..." : "Sync from Portal"}
+            </button>
+
+            {erpStatus?.saved && reLogin && (
+              <button
+                onClick={() => {
+                  setReLogin(false);
+                  setErpPass("");
+                  setErpError("");
+                }}
+                className="text-xs underline"
+              >
+                Cancel
+              </button>
+            )}
+
+            <p className="text-[11px] text-gray-500">
+              Your password is encrypted and used only to fetch your
+              attendance. We never share it.
+            </p>
+          </>
+        )}
+
+        {erpError && <p className="text-red-400 text-sm">{erpError}</p>}
+        {erpMessage && <p className="text-green-400 text-sm">{erpMessage}</p>}
+      </div>
+
+      <button
+        onClick={() => setShowManual((v) => !v)}
+        className="text-sm underline text-gray-400"
+      >
+        {showManual ? "Hide manual paste" : "Paste manually instead"}
+      </button>
+
+      {showManual && (
+      <>
       <div className="soft-card p-4 space-y-3">
         <p className="font-semibold">Paste ERP Data</p>
 
@@ -446,6 +702,8 @@ export default function ImportPage() {
 
       {error && <p className="text-red-400">{error}</p>}
       {message && <p className="text-green-400">{message}</p>}
+      </>
+      )}
 
       <BottomNav />
     </div>

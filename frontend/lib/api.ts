@@ -498,6 +498,77 @@ export async function importAttendance(
   return handleResponse<{ message: string; subjects_imported?: number }>(res);
 }
 
+/* ---------------- ERP PORTAL SYNC ---------------- */
+
+export type ErpSyncResult = {
+  message: string;
+  subjects_imported: number;
+  average?: number;
+  student?: { name?: string; prn?: string; stuid?: number };
+  credentials_saved?: boolean;
+};
+
+export type ErpStatus = {
+  saved: boolean;
+  erp_username?: string;
+  institute_slug?: string;
+  last_synced_at?: string | null;
+  last_sync_status?: string;
+};
+
+// Live server-side login to the college portal. Slow (several portal round
+// trips + a possible backend cold start), so allow a generous timeout.
+export async function erpSync(
+  payload: {
+    erp_username: string;
+    erp_password: string;
+    institute_slug?: string;
+    save_credentials: boolean;
+  },
+  userId: number
+) {
+  invalidateCache(`home-data-${userId}`, `dashboard-${userId}`, `subjects-${userId}`);
+
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/erp-sync`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    0,
+    60000
+  );
+
+  return handleResponse<ErpSyncResult>(res);
+}
+
+// Re-sync using credentials already stored on the server (no password sent).
+export async function erpResync(userId: number) {
+  invalidateCache(`home-data-${userId}`, `dashboard-${userId}`, `subjects-${userId}`);
+
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/erp-resync`,
+    { method: "POST" },
+    0,
+    60000
+  );
+
+  return handleResponse<ErpSyncResult>(res);
+}
+
+export async function getErpStatus(userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/erp-status`);
+  return handleResponse<ErpStatus>(res);
+}
+
+export async function deleteErpCredentials(userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/erp-credentials`, {
+    method: "DELETE",
+  });
+  return handleResponse<{ message: string }>(res);
+}
+
 /* ---------------- SUBJECTS ---------------- */
 
 export async function getSubjects(userId: number) {
