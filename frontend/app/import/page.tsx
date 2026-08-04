@@ -258,6 +258,7 @@ export default function ImportPage() {
   const [erpStatus, setErpStatus] = useState<ErpStatus | null>(null);
   const [erpMessage, setErpMessage] = useState("");
   const [erpError, setErpError] = useState("");
+  const [erpConflicts, setErpConflicts] = useState<string[]>([]);
   const [reLogin, setReLogin] = useState(false);
   const [showManual, setShowManual] = useState(false);
 
@@ -283,6 +284,7 @@ export default function ImportPage() {
           }`
         : result.message
     );
+    setErpConflicts(result.timetable_conflicts ?? []);
     setReLogin(false);
     setErpPass("");
     refreshErpStatus();
@@ -575,6 +577,20 @@ export default function ImportPage() {
 
         {erpError && <p className="text-red-400 text-sm">{erpError}</p>}
         {erpMessage && <p className="text-green-400 text-sm">{erpMessage}</p>}
+
+        {erpConflicts.length > 0 && (
+          <div className="text-xs text-amber-400/90 space-y-1">
+            <p>
+              Two lab batches share these slots — we kept the first. Fix yours on
+              the Schedule page:
+            </p>
+            <ul className="list-disc pl-4 space-y-0.5">
+              {erpConflicts.map((c) => (
+                <li key={c}>{c}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       <button

@@ -503,6 +503,8 @@ export async function importAttendance(
 export type ErpSyncResult = {
   message: string;
   subjects_imported: number;
+  periods_imported?: number;
+  timetable_conflicts?: string[];
   average?: number;
   student?: { name?: string; prn?: string; stuid?: number };
   credentials_saved?: boolean;
