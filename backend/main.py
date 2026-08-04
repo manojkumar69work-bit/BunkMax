@@ -2290,6 +2290,42 @@ def _upsert_erp_subjects(cur, user_id, subjects, attendance) -> int:
     return imported
 
 
+def _upsert_timetable(cur, user_id, entries) -> int:
+    """
+    Replace the user's weekly timetable with `entries` using an open cursor.
+
+    Expects [{day_name, period_no, subject_name}]. Destructive on purpose: the
+    portal timetable is authoritative, so stale slots (a subject that moved or
+    was dropped) must disappear rather than linger. A no-op when `entries` is
+    empty, so a portal hiccup can never wipe a saved timetable.
+    """
+    rows = []
+    for entry in entries or []:
+        day_name = clean_text(entry.get("day_name"))
+        subject_name = clean_text(entry.get("subject_name"))
+        try:
+            period_no = int(entry.get("period_no") or 0)
+        except (TypeError, ValueError):
+            continue
+        if day_name not in VALID_DAYS or not subject_name:
+            continue
+        if period_no < 1 or period_no > CLASS_PERIODS:
+            continue
+        rows.append((user_id, day_name, period_no, subject_name))
+
+    if not rows:
+        return 0
+
+    cur.execute("DELETE FROM timetable WHERE user_id = %s", (user_id,))
+    cur.executemany("""
+        INSERT INTO timetable (user_id, day_name, period_no, subject_name)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (user_id, day_name, period_no)
+        DO UPDATE SET subject_name = EXCLUDED.subject_name
+    """, rows)
+    return len(rows)
+
+
 @app.post("/users/{user_id}/import-attendance")
 def import_attendance(
     user_id: int,
@@ -2341,15 +2377,17 @@ def _ensure_erp_credentials_table(cur) -> None:
 
 def _run_erp_sync(user_id: int, username: str, password: str, slug: str,
                   *, save_credentials: bool) -> dict:
-    """Fetch from the portal, upsert subjects, optionally persist credentials."""
-    result = vmedulife.fetch_attendance(username, password, slug)
+    """Fetch from the portal, upsert subjects + timetable, optionally persist credentials."""
+    result = vmedulife.fetch_all(username, password, slug)
     subjects = result["subjects"]
     attendance = result["attendance"]
+    timetable = result.get("timetable") or []
 
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             imported = _upsert_erp_subjects(cur, user_id, subjects, attendance)
+            periods_imported = _upsert_timetable(cur, user_id, timetable)
 
             if save_credentials:
                 _ensure_erp_credentials_table(cur)
@@ -2387,13 +2425,18 @@ def _run_erp_sync(user_id: int, username: str, password: str, slug: str,
     finally:
         conn.close()
 
+    if imported:
+        message = f"{imported} subjects synced from the portal."
+    else:
+        message = "Signed in, but no attendance found yet (no classes conducted)."
+    if periods_imported:
+        message += f" Timetable synced ({periods_imported} periods)."
+
     return {
-        "message": (
-            f"{imported} subjects synced from the portal."
-            if imported
-            else "Signed in, but no attendance found yet (no classes conducted)."
-        ),
+        "message": message,
         "subjects_imported": imported,
+        "periods_imported": periods_imported,
+        "timetable_conflicts": result.get("timetable_conflicts") or [],
         "average": result.get("average", 0),
         "student": result.get("student", {}),
         "credentials_saved": save_credentials,
