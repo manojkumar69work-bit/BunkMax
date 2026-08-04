@@ -21,7 +21,7 @@ import razorpay
 
 from push_notifications import send_push_to_tokens
 import crypto_util
-import vmedulife
+import campushub as vmedulife  # CampusHub client, same public surface as the old vmedulife module
 
 razorpay_client = None
 if os.getenv("RAZORPAY_KEY_ID") and os.getenv("RAZORPAY_KEY_SECRET"):
