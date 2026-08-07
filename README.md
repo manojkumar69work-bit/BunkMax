@@ -1,14 +1,62 @@
 # BunkMax
 
-Attendance tracker for MLRIT students. Pulls subject-wise attendance and the
-weekly timetable from the college portal (CampusHub), then tells you how many
-classes you can safely skip.
+**How many classes can I skip and still stay above 75%?**
 
-- **frontend/** — Next.js 16 app (App Router, Tailwind, next-auth Google login
-  restricted to `@mlrit.ac.in`). Talks to the backend only through
-  `/api/backend/*`, which injects the service secret.
-- **backend/** — FastAPI + Postgres (Supabase). Attendance math, timetable,
-  planner, Razorpay subscriptions, Firebase push notifications, ERP sync.
+Every MLRIT student asks this. Answering it meant opening the college portal, reading a table, and doing arithmetic per subject. BunkMax answers it in one tap — and keeps answering it, because it re-syncs itself every day.
+
+**🔗 [bunk-max.vercel.app](https://bunk-max.vercel.app)** · Next.js 16 + FastAPI + Postgres · live
+
+<!-- TODO: add a screenshot here — it's the single highest-value addition to this README.
+     ![BunkMax dashboard](docs/screenshot.png) -->
+
+---
+
+## The hard part: the college portal has no API
+
+CampusHub, the college ERP, exposes no documented API and no export. So I read its shipped JavaScript bundles and reconstructed the request contract by hand:
+
+- request payloads are **base64-encoded**, not plain JSON
+- the session lives in a **cookie nested inside another cookie's value**
+- endpoints reject anything without matching **`Origin` and `Referer`** headers
+
+Once decoded, one login pulls subject-wise attendance *and* the weekly timetable. Credentials are encrypted at rest with **Fernet** so a daily cron can re-sync without asking the user to log in again.
+
+**Then the college replaced the portal mid-project.** The old integration targeted vmedulife; the replacement was CampusHub, a different system with a different contract. I rewrote the client behind an unchanged interface, so nothing above the portal layer changed — see [`backend/campushub.py`](backend/campushub.py) and [`ERP_SYNC.md`](ERP_SYNC.md).
+
+## Other things worth a look
+
+**Running a real product on a free tier.** Render's free instance sleeps and caps connections, so: a single uvicorn worker, a DB pool capped under the Supabase pooler budget, and a `/health` keep-warm ping. Cost to run: ₹0 of infrastructure.
+
+**Payments that can't be spoofed.** Razorpay orders with signature-verified webhooks — the subscription state changes on the *verified webhook*, not on the browser redirect.
+
+**A backend the browser can never reach directly.** The frontend talks only to `/api/backend/*`, a Next.js proxy that injects a service secret. `BACKEND_API_SECRET` never reaches the client.
+
+**Scheduled push.** Morning and evening cron jobs push the day's class count via Firebase.
+
+---
+
+## Architecture
+
+```
+Next.js 16 (Vercel)                  FastAPI (Render)              Postgres (Supabase)
+ ├ Google login, @mlrit.ac.in only    ├ attendance math             ├ users, attendance
+ ├ /api/backend/* proxy ──────────────┤ planner                     ├ timetable
+ └ Firebase web push                  ├ Razorpay + webhooks         └ subscriptions
+                                      ├ Firebase push
+                                      └ CampusHub sync ──────────► college ERP
+                                          (Fernet-encrypted creds)
+```
+
+| Path | What's in it |
+|---|---|
+| [`backend/campushub.py`](backend/campushub.py) | The reverse-engineered portal client |
+| [`backend/crypto_util.py`](backend/crypto_util.py) | Fernet encryption for stored ERP credentials |
+| [`backend/main.py`](backend/main.py) | 30+ REST endpoints, cron routes, rate limiting |
+| [`backend/push_notifications.py`](backend/push_notifications.py) | Firebase push |
+| [`frontend/proxy.ts`](frontend/proxy.ts) | Secret-injecting backend proxy |
+| [`ERP_SYNC.md`](ERP_SYNC.md) | Full write-up of the sync design |
+
+---
 
 ## Run locally
 
@@ -73,8 +121,6 @@ Point an external scheduler at these with the `NOTIFICATION_CRON_SECRET`:
 Backend: `render.yaml` (Render blueprint; secrets set in the dashboard).
 Frontend: Vercel.
 
-## More
+---
 
-`ERP_SYNC.md` documents the portal sync design. The endpoints and DB schema
-there are current; the portal client itself has since moved from vmedulife to
-CampusHub — see `backend/campushub.py`.
+<sub>Built by [Manoj Kumar Ethini](https://github.com/manojkumar69work-bit) · not affiliated with or endorsed by MLR Institute of Technology</sub>
