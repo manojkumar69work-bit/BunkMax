@@ -262,6 +262,14 @@ export default function ImportPage() {
   const [reLogin, setReLogin] = useState(false);
   const [showManual, setShowManual] = useState(false);
 
+  // CampusHub logs in as "<roll>@mlrit.ac.in", so the Google email's local part
+  // is the ERP roll number — prefill it instead of asking again.
+  const rollFromEmail = (appUser?.email?.split("@")[0] || "").toUpperCase();
+
+  useEffect(() => {
+    if (rollFromEmail) setErpId((current) => current || rollFromEmail);
+  }, [rollFromEmail]);
+
   const refreshErpStatus = useCallback(async () => {
     if (!appUser) return;
     try {
@@ -459,7 +467,7 @@ export default function ImportPage() {
       <div className="glass-card p-4 space-y-3">
         <div className="flex items-center justify-between">
           <p className="font-semibold">Sync from Portal</p>
-          <span className="text-xs text-gray-400">vmedulife</span>
+          <span className="text-xs text-gray-400">CampusHub</span>
         </div>
 
         {erpStatus?.saved && !reLogin ? (
@@ -504,15 +512,16 @@ export default function ImportPage() {
         ) : (
           <>
             <p className="text-sm text-gray-400">
-              Enter your college portal login and we&apos;ll pull your
-              attendance automatically.
+              {rollFromEmail
+                ? "We picked up your roll number from your college email — just add your portal password."
+                : "Enter your college portal login and we'll pull your attendance automatically."}
             </p>
 
             <input
               className="input-ui"
               value={erpId}
               onChange={(e) => setErpId(e.target.value)}
-              placeholder="ERP ID (e.g. STMLRIT24728)"
+              placeholder="Roll number (e.g. 24R21A0522)"
               autoCapitalize="characters"
               autoComplete="username"
             />
