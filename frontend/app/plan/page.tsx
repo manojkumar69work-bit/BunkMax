@@ -37,76 +37,27 @@ type CalendarResult = {
   }>;
 };
 
+// 2026 central-government gazetted holidays (DoPT list). Lunar dates shift every
+// year, so this needs replacing each January — nothing here is computable.
 const INDIAN_HOLIDAYS: Record<string, string> = {
   "2026-01-26": "Republic Day",
-  "2026-03-14": "Holi",
-  "2026-03-30": "Ramadan (Idul Fitr)",
-  "2026-04-02": "Ram Navami",
-  "2026-04-14": "Mahavir Jayanti",
-  "2026-04-21": "Good Friday",
-  "2026-05-01": "Labour Day",
-  "2026-05-06": "Buddha Purnima",
-  "2026-07-06": "Idul Juha (Bakrid)",
-  "2026-08-05": "Muharram",
+  "2026-03-04": "Holi",
+  "2026-03-21": "Idul Fitr",
+  "2026-03-26": "Ram Navami",
+  "2026-03-31": "Mahavir Jayanti",
+  "2026-04-03": "Good Friday",
+  "2026-05-01": "Labour Day / Buddha Purnima",
+  "2026-05-27": "Idul Zuha (Bakrid)",
+  "2026-06-26": "Muharram",
   "2026-08-15": "Independence Day",
-  "2026-08-27": "Janmashtami",
+  "2026-08-26": "Milad-un-Nabi",
+  "2026-09-04": "Janmashtami",
   "2026-10-02": "Gandhi Jayanti",
-  "2026-10-05": "Milad-un-Nabi",
-  "2026-10-12": "Dussehra",
-  "2026-10-31": "Diwali",
-  "2026-11-01": "Diwali",
-  "2026-11-15": "Guru Nanak Jayanti",
+  "2026-10-20": "Dussehra",
+  "2026-11-08": "Diwali",
+  "2026-11-24": "Guru Nanak Jayanti",
   "2026-12-25": "Christmas Day",
 };
-
-const INDIAN_HOLIDAYS_2025: Record<string, string> = {
-  "2025-01-26": "Republic Day",
-  "2025-03-14": "Holi",
-  "2025-03-31": "Ramadan (Idul Fitr)",
-  "2025-04-06": "Ram Navami",
-  "2025-04-10": "Mahavir Jayanti",
-  "2025-04-18": "Good Friday",
-  "2025-05-01": "Labour Day",
-  "2025-05-12": "Buddha Purnima",
-  "2025-06-12": "Idul Juha (Bakrid)",
-  "2025-07-03": "Muharram",
-  "2025-08-15": "Independence Day",
-  "2025-08-16": "Janmashtami",
-  "2025-09-05": "Milad-un-Nabi",
-  "2025-10-02": "Gandhi Jayanti",
-  "2025-10-07": "Dussehra",
-  "2025-10-22": "Diwali",
-  "2025-10-23": "Diwali",
-  "2025-11-05": "Guru Nanak Jayanti",
-  "2025-12-25": "Christmas Day",
-};
-
-const INDIAN_HOLIDAYS_2027: Record<string, string> = {
-  "2027-01-26": "Republic Day",
-  "2027-03-03": "Holi",
-  "2027-03-20": "Ramadan (Idul Fitr)",
-  "2027-03-23": "Ram Navami",
-  "2027-04-02": "Mahavir Jayanti",
-  "2027-05-01": "Labour Day",
-  "2027-04-26": "Buddha Purnima",
-  "2027-06-20": "Idul Juha (Bakrid)",
-  "2027-07-10": "Muharram",
-  "2027-08-15": "Independence Day",
-  "2027-08-26": "Janmashtami",
-  "2027-10-02": "Gandhi Jayanti",
-  "2027-09-15": "Milad-un-Nabi",
-  "2027-10-01": "Dussehra",
-  "2027-10-19": "Diwali",
-  "2027-10-20": "Diwali",
-  "2027-11-07": "Guru Nanak Jayanti",
-  "2027-12-25": "Christmas Day",
-};
-
-function getHolidaysForYear(year: number): Record<string, string> {
-  if (year === 2025) return INDIAN_HOLIDAYS_2025;
-  if (year === 2027) return INDIAN_HOLIDAYS_2027;
-  return INDIAN_HOLIDAYS;
-}
 
 function generateCalendarDays(date: Date): (number | null)[] {
   const year = date.getFullYear();
@@ -173,7 +124,7 @@ export default function PlanPage() {
   const [runningPrediction, setRunningPrediction] = useState(false);
   const [error, setError] = useState("");
 
-  const holidays = getHolidaysForYear(currentMonth.getFullYear());
+  const holidays = INDIAN_HOLIDAYS;
 
   function previousMonth() {
     const today = new Date();
