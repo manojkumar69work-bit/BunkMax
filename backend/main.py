@@ -21,7 +21,7 @@ import razorpay
 
 from push_notifications import send_push_to_tokens
 import crypto_util
-import campushub as vmedulife  # CampusHub client, same public surface as the old vmedulife module
+import campushub
 
 razorpay_client = None
 if os.getenv("RAZORPAY_KEY_ID") and os.getenv("RAZORPAY_KEY_SECRET"):
@@ -298,7 +298,7 @@ class ERPImportPayload(BaseModel):
 class ERPSyncPayload(BaseModel):
     erp_username: str = Field(..., min_length=1, max_length=100)
     erp_password: str = Field(..., min_length=1, max_length=200)
-    institute_slug: str = Field(default=vmedulife.DEFAULT_SLUG, max_length=100)
+    institute_slug: str = Field(default=campushub.DEFAULT_SLUG, max_length=100)
     save_credentials: bool = True
 
 
@@ -2356,7 +2356,7 @@ def import_attendance(
 
 
 # ─────────────────────────── ERP portal sync ───────────────────────────
-# Server-side login to the college portal (vmedulife) so students don't have
+# Server-side login to the college portal (CampusHub) so students don't have
 # to copy-paste. Credentials can optionally be stored (Fernet-encrypted) for
 # one-tap re-sync and the daily auto-sync cron.
 
@@ -2378,7 +2378,7 @@ def _ensure_erp_credentials_table(cur) -> None:
 def _run_erp_sync(user_id: int, username: str, password: str, slug: str,
                   *, save_credentials: bool) -> dict:
     """Fetch from the portal, upsert subjects + timetable, optionally persist credentials."""
-    result = vmedulife.fetch_all(username, password, slug)
+    result = campushub.fetch_all(username, password, slug)
     subjects = result["subjects"]
     attendance = result["attendance"]
     timetable = result.get("timetable") or []
@@ -2459,10 +2459,10 @@ def erp_sync(
             user_id,
             payload.erp_username,
             payload.erp_password,
-            payload.institute_slug or vmedulife.DEFAULT_SLUG,
+            payload.institute_slug or campushub.DEFAULT_SLUG,
             save_credentials=payload.save_credentials,
         )
-    except vmedulife.ERPError as exc:
+    except campushub.ERPError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message)
     except crypto_util.CredentialCryptoError:
         logger.exception("ERP credential encryption failed for user %s", user_id)
@@ -2508,10 +2508,10 @@ def erp_resync(user_id: int, _: None = Depends(require_service_secret)):
             user_id,
             row["erp_username"],
             password,
-            row.get("institute_slug") or vmedulife.DEFAULT_SLUG,
+            row.get("institute_slug") or campushub.DEFAULT_SLUG,
             save_credentials=True,
         )
-    except vmedulife.ERPError as exc:
+    except campushub.ERPError as exc:
         _mark_erp_sync_status(user_id, f"error: {exc.message}"[:200])
         raise HTTPException(status_code=exc.status, detail=exc.message)
     except HTTPException:
@@ -2610,11 +2610,11 @@ def cron_erp_sync_all(_: None = Depends(require_notification_cron_secret)):
                 uid,
                 row["erp_username"],
                 password,
-                row.get("institute_slug") or vmedulife.DEFAULT_SLUG,
+                row.get("institute_slug") or campushub.DEFAULT_SLUG,
                 save_credentials=True,
             )
             synced += 1
-        except vmedulife.ERPError as exc:
+        except campushub.ERPError as exc:
             failed += 1
             _mark_erp_sync_status(uid, f"error: {exc.message}"[:200])
         except Exception:
