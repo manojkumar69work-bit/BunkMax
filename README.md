@@ -21,7 +21,7 @@ CampusHub, the college ERP, exposes no documented API and no export. So I read i
 
 Once decoded, one login pulls subject-wise attendance *and* the weekly timetable. Credentials are encrypted at rest with **Fernet** so a daily cron can re-sync without asking the user to log in again.
 
-**Then the college replaced the portal mid-project.** The old integration targeted vmedulife; the replacement was CampusHub, a different system with a different contract. I rewrote the client behind an unchanged interface, so nothing above the portal layer changed — see [`backend/campushub.py`](backend/campushub.py) and [`ERP_SYNC.md`](ERP_SYNC.md).
+**Then the college replaced the portal mid-project.** The integration had been built against the old portal; the replacement was CampusHub, a different system with a different contract. I rewrote the client behind an unchanged interface, so nothing above the portal layer changed — see [`backend/campushub.py`](backend/campushub.py) and [`ERP_SYNC.md`](ERP_SYNC.md).
 
 ## Other things worth a look
 
