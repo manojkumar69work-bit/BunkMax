@@ -1,14 +1,13 @@
 """
 CampusHub (campushub.mlrit.ac.in) student-portal client.
 
-Replaces the old vmedulife client. CampusHub is a Next.js app backed directly
-by Supabase; there is no bespoke API. Auth is Supabase email/password
-(email = "<rollno>@mlrit.ac.in") and attendance lives in the world-readable
-`student_attendance_summary` view keyed by the roll number.
+CampusHub is a Next.js app backed directly by Supabase; there is no bespoke
+API. Auth is Supabase email/password (email = "<rollno>@mlrit.ac.in") and
+attendance lives in the world-readable `student_attendance_summary` view keyed
+by the roll number.
 
-`fetch_attendance(username, password, slug)` keeps the exact same signature and
-return shape as the vmedulife client, so it stays a drop-in for /import.
-`slug` is vestigial (single institute) and ignored.
+`fetch_attendance(username, password, slug)` returns the normalized payload
+`/import` consumes. `slug` is vestigial (single institute) and ignored.
 
 The weekly timetable comes from CampusHub's own server route
 `/api/student/timetable?department=&section=&year=&semester=` (Bearer token),

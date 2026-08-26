@@ -1,7 +1,7 @@
 """
 Symmetric encryption for third-party (ERP) credentials stored at rest.
 
-We store the student's vmedulife password so BunkMax can re-sync attendance
+We store the student's CampusHub password so BunkMax can re-sync attendance
 without the student re-entering it. That password belongs to a third party, so
 it is encrypted with Fernet (AES-128-CBC + HMAC-SHA256) using a key that lives
 only in the environment (ERP_CRED_KEY), never in the database or the repo.
