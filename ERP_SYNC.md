@@ -1,9 +1,10 @@
 # Server-Side ERP Attendance Sync
 
 Replaces the copy-paste import with a direct, server-side login to the college
-portal (**vmedulife**). A student enters their ERP ID + password once; BunkMax
-logs in on their behalf, pulls subject-wise attendance, and imports it. Login
-can be saved (encrypted) for one-tap re-sync and a daily auto-sync.
+portal (**CampusHub**). A student enters their ERP roll number + password once;
+BunkMax logs in on their behalf, pulls subject-wise attendance and the weekly
+timetable, and imports both. Login can be saved (encrypted) for one-tap
+re-sync and a daily auto-sync.
 
 The old copy-paste flow is **kept** as a fallback (collapsed under "Paste
 manually instead" on the Import page).
@@ -12,81 +13,118 @@ manually instead" on the Import page).
 
 ## 1. Reverse-engineered portal API
 
-The portal (`portal.vmedulife.com`) is a React SPA backed by PHP endpoints.
-The attendance data comes from the "Academic Planning" page
-(`/student/Planning/GroupSubjectList.php`). All of the following was decoded
+CampusHub (`campushub.mlrit.ac.in`) is a Next.js SPA backed **directly by
+Supabase** — there is no bespoke attendance API. The contract below was decoded
 from the shipped JS bundles and verified live.
 
-**Guards / encoding**
-- Every request **must** send `Origin: https://portal.vmedulife.com` and a
-  matching `Referer`, or the server replies
-  `{"error":"API call from a third party is not allowed"}`.
-- `data` form fields are `base64(JSON)`.
-- The `user_details` cookie is `base64(base64(JSON))`.
-- Learner endpoints authenticate with `Authorization: Basic <user_token>`
-  plus session cookies.
+**Auth**
 
-**Request flow** (all POST):
+Supabase email/password. The portal's own login takes a roll number and maps it
+to an email server-side; we skip that hop and construct the email directly.
 
-| # | Endpoint | Action / body | Returns |
+| # | Endpoint | Body / params | Returns |
 |---|----------|---------------|---------|
-| 1 | `/api/generic_api.php` | `getInstituteDataByURL` + `data=base64({url:slug})` | `InstituteId` (MLRIT slug `mlrit-hyderabad` → `1069`) |
-| 2 | `/api/generic_api.php` | `verifyInstituteUserCredentials` + `data=base64({username,password,institute_id})` | `tokenDetails` (user_token, sync_token), `studentData` (stuid, Acayear, groupDetailsArray…), `AcademicYearList` |
-| 3 | `/api/learner/generic_api.php` | `getLearnerAcayrStreamGroupList=true&studentid=&acayr=&iid=` | streams → `[{groupid}]` |
-| 4 | `/api/learner/subject_api.php` | `getLearnerAssignedSubjectList=true&learnerid=&acayr=&sidArray=&groupIdArray=` | `data[sid][groupId] = [{subject_id, subject_name, subject_type, batch_Id}]` |
-| 5 | `/api/learner/subject_api.php` | `planning_GetStudentSubjectwiseAttendance=true&data=base64(inputParam)&tokenInputParameter=base64({source:web,uid,role:learner})` (header `Authorization: Basic <user_token>`) | `{averageAttendance, data:{<subject_id>:{percentage, presentSessionsCount, totalsessions}}}` |
+| 1 | `POST {SUPABASE_URL}/auth/v1/token?grant_type=password` (header `apikey`) | `{email: "<roll-lowercase>@mlrit.ac.in", password}` | `access_token` |
 
-Between steps 2 and 3 the client sets session cookies from the login response
-(`user_token`, `sync_token`, `user_details`, their `_wc` variants, `acyear`,
-`learner_groupDetailsArray`, …); the server-side client recreates these.
+`400`/`401` here means bad credentials and nothing else, so it maps cleanly to
+a user-facing "Invalid ERP roll number or password".
 
-The subject id ↔ attendance map is normalized into the payload the existing
-importer already understands:
+**Attendance**
+
+| # | Endpoint | Params | Returns |
+|---|----------|--------|---------|
+| 2 | `GET {SUPABASE_URL}/rest/v1/student_attendance_summary` (headers `apikey` + `Authorization: Bearer <access_token>`) | `student_id=eq.<ROLL-UPPER>`, `select=subject_name,subject_code,total_classes,classes_attended,attendance_percentage` | `[{subject_name, subject_code, total_classes, classes_attended, attendance_percentage}]` |
+
+> The view is world-readable to any authenticated (or anon) user, so the client
+> **must** filter by `student_id` itself. Live rows are keyed by **roll
+> number**; a few stray demo rows use auth-uid uuids. The raw per-session table
+> `attendance` (student_id, subject, class_name, date, present) also exists —
+> the summary view is the aggregate we consume.
+
+**Timetable**
+
+The raw `timetable` table stores subject uuids and `subjects` is RLS-locked to
+students, so we use CampusHub's own server route, which resolves names for us.
+
+| # | Endpoint | Params | Returns |
+|---|----------|--------|---------|
+| 3 | `POST campushub.mlrit.ac.in/api/auth/login` | `{rollNumber}` | `user` profile — `department`, `section`, `year`, `semester`, `name` |
+| 4 | `GET campushub.mlrit.ac.in/api/student/timetable` (header `Authorization: Bearer <access_token>`) | `department`, `section`, `year`, `semester` | `{classes: [{weekday, period_start, period_end, subject_name, subject_code, is_recurring, start_date, end_date}]}` |
+
+Timetable normalization rules (`_normalize_timetable`):
+
+- `weekday` follows JS `Date.getDay()` — `0` = Sunday … `6` = Saturday.
+- A row covers `period_start..period_end`; labs span several periods and are
+  expanded into one entry per period, clipped to BunkMax's 6-period grid.
+- Only **currently-active recurring** rows count: `is_recurring` must be true,
+  and any `start_date`/`end_date` window must contain today. One-off classes
+  must never overwrite the weekly grid.
+- Batch-split labs leave `batch` null, so two rows can claim one slot. The
+  first by subject name wins, deterministically, and the loser is reported in
+  `timetable_conflicts` rather than silently dropped.
+
+**Normalized payload**
+
+Both datasets are normalized into the shape the existing importer already
+understands:
 
 ```json
 {
-  "subjects":   [{ "subjectid": "<id>", "subject_name": "<name>" }],
-  "attendance": { "<id>": { "totalsessions": 0, "presentSessionsCount": 0, "percentage": "0.00" } }
+  "subjects":   [{ "subjectid": "<name>", "subject_name": "<name>" }],
+  "attendance": { "<name>": { "totalsessions": 0, "presentSessionsCount": 0, "percentage": "0.00" } },
+  "average":    0,
+  "student":    { "name": "…", "prn": "<roll>", "stuid": "<roll>" },
+  "timetable":  [{ "day_name": "Monday", "period_no": 1, "subject_name": "…" }],
+  "timetable_conflicts": []
 }
 ```
 
 > Empty attendance is a **valid** result — e.g. when no classes have been
-> conducted yet. It is not treated as an error.
+> conducted yet. It is not treated as an error. A timetable failure is
+> likewise non-fatal: attendance still syncs and `timetable` comes back empty.
 
 ---
 
 ## 2. Architecture
 
 ```
-Import page  ──►  Next.js proxy  ──►  FastAPI backend  ──►  vmedulife portal
-(erpSync)        (/api/backend/*)     (/users/{id}/erp-*)     (login → attendance)
-                 adds service secret   vmedulife.py client
+Import page  ──►  Next.js proxy  ──►  FastAPI backend  ──►  CampusHub / Supabase
+(erpSync)        (/api/backend/*)     (/users/{id}/erp-*)    (login → attendance
+                 adds service secret   campushub.py client                → timetable)
                                        crypto_util.py (Fernet)
                                        erp_credentials table (Postgres)
 ```
 
 The existing frontend proxy already forwards every `/users/{id}/*` call with
-the backend service secret, so the new endpoints needed **no proxy changes**.
+the backend service secret, so the ERP endpoints needed **no proxy changes**.
 
 ---
 
 ## 3. Files
 
-### New — backend
-- **`backend/vmedulife.py`** — the ERP client. `fetch_attendance(username,
-  password, slug)` runs the full login → attendance pipeline and returns the
-  normalized payload plus `average` and `student` info. Raises `ERPError`
-  (with an HTTP `status`) on bad credentials, portal timeouts, etc.
+### Backend
+- **`backend/campushub.py`** — the ERP client. `fetch_all(username, password,
+  slug, *, with_timetable=True)` does one login and returns attendance +
+  timetable; `fetch_attendance(...)` is the attendance-only wrapper. Raises
+  `ERPError` (with an HTTP `status`) on bad credentials, portal timeouts, etc.
+  `slug` is vestigial (single institute) and ignored, kept for the stored-
+  credential column and signature compatibility. Running the module directly
+  with no arguments executes offline self-checks of both normalizers; with
+  `<roll> <password>` it prints a live payload.
 - **`backend/crypto_util.py`** — Fernet (AES-128-CBC + HMAC-SHA256)
   `encrypt` / `decrypt` for stored ERP passwords. Key comes from the
   `ERP_CRED_KEY` env var only; never stored in the DB or repo.
 
-### Modified — backend (`backend/main.py`)
+### Backend (`backend/main.py`)
 - `ERPSyncPayload` model.
 - `_upsert_erp_subjects(cur, user_id, subjects, attendance)` — shared upsert
-  helper extracted from the copy-paste importer (now used by both paths).
+  helper used by both the ERP and copy-paste paths. Non-destructive.
+- `_upsert_timetable(cur, user_id, entries)` — replaces the weekly grid.
+  Destructive on purpose (the portal is authoritative, so moved or dropped
+  slots must disappear), but a no-op on empty input so a portal hiccup can
+  never wipe a saved timetable.
 - `_run_erp_sync(...)` — fetch → upsert → optionally persist credentials.
-- New endpoints (all behind the service secret):
+- Endpoints (all behind the service secret):
   - `POST /users/{id}/erp-sync` — login, import, optionally save creds.
   - `POST /users/{id}/erp-resync` — re-sync from **saved** creds (no password
     in the request).
@@ -99,18 +137,17 @@ the backend service secret, so the new endpoints needed **no proxy changes**.
   lazily (`CREATE TABLE IF NOT EXISTS`) inside the ERP endpoints so it
   self-heals without a manual migration.
 
-### Modified — backend (other)
-- `requirements.txt` — pinned `requests`, `cryptography` (both already present
-  transitively).
+### Backend (other)
+- `requirements.txt` — pinned `requests`, `cryptography`.
 - `.env.example` — documented `ERP_CRED_KEY` + how to generate it.
 - `render.yaml` — noted `ERP_CRED_KEY` in the dashboard-secrets list.
 
-### Modified — frontend
+### Frontend
 - **`lib/api.ts`** — `erpSync`, `erpResync`, `getErpStatus`,
   `deleteErpCredentials` + their types.
 - **`app/import/page.tsx`** — a **Sync from Portal** card on top:
-  - Not saved yet → ERP ID + password (show/hide) + "keep me synced" checkbox
-    (default on) + **Sync from Portal**.
+  - Not saved yet → ERP roll number + password (show/hide) + "keep me synced"
+    checkbox (default on) + **Sync from Portal**.
   - Saved → "Signed in as … · last synced …" with **Sync now**, "Use a
     different login", and "Remove saved login".
   - Copy-paste importer preserved under a **Paste manually instead** toggle.
@@ -120,7 +157,7 @@ the backend service secret, so the new endpoints needed **no proxy changes**.
 ```sql
 CREATE TABLE IF NOT EXISTS erp_credentials (
     user_id          INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    erp_username     TEXT NOT NULL,
+    erp_username     TEXT NOT NULL,          -- the roll number
     erp_password_enc TEXT NOT NULL,          -- Fernet ciphertext
     institute_slug   TEXT DEFAULT 'mlrit-hyderabad',
     last_synced_at   TIMESTAMPTZ,
@@ -140,8 +177,12 @@ CREATE TABLE IF NOT EXISTS erp_credentials (
   + last-synced only).
 - If the key rotates, old ciphertext can't be decrypted — the user re-enters
   once (handled with a clean `409`).
-- Sync is **non-destructive**: it upserts only the subjects it fetches
-  (`ON CONFLICT (user_id, subject_name)`); it never deletes existing subjects.
+- The Supabase publishable (anon) key is not a secret — it ships in CampusHub's
+  own JS bundle — but it grants read access to the world-readable summary view,
+  which is why the client always filters by the caller's own `student_id`.
+- Attendance sync is **non-destructive**: it upserts only the subjects it
+  fetches (`ON CONFLICT (user_id, subject_name)`) and never deletes existing
+  ones. The timetable sync is the one deliberate exception (see above).
 
 ---
 
@@ -168,12 +209,13 @@ CREATE TABLE IF NOT EXISTS erp_credentials (
 
 Tested live against the portal + production DB:
 
-- `erp-sync` (save on) → logged in, saved encrypted creds, returned 0 subjects
-  (no classes) — correct.
+- `erp-sync` (save on) → logged in, saved encrypted creds, imported subjects
+  and the weekly timetable.
 - `erp-status` → `saved: true`, username, last-synced, `ok`.
 - `erp-resync` → decrypted stored password and re-fetched.
-- Wrong password → `401 Invalid username or password`.
+- Wrong password → `401 Invalid ERP roll number or password`.
 - Missing service secret → `401`.
 - Delete credentials → removed.
 - Existing subjects left untouched; test credential cleaned up afterwards.
+- `python backend/campushub.py` → normalizer self-checks pass.
 - Frontend `tsc --noEmit` ✓, `eslint` ✓.
