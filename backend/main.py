@@ -2237,8 +2237,8 @@ def _upsert_erp_subjects(cur, user_id, subjects, attendance) -> int:
 
     Shared by the copy-paste importer and the server-side portal sync. Expects
     `subjects` as [{subjectid, subject_name}] and `attendance` as
-    {subjectid: {totalsessions, presentSessionsCount}}. Returns the count
-    written.
+    {subjectid: {totalsessions, presentSessionsCount, percentage}}.
+    Returns the count written.
     """
     imported = 0
 
@@ -2263,6 +2263,14 @@ def _upsert_erp_subjects(cur, user_id, subjects, attendance) -> int:
         if present > total:
             present = total
 
+        # Use the percentage from the payload to derive required_percentage,
+        # falling back to 75 when the importer didn't supply one.
+        try:
+            pct = float(stats.get("percentage") or 0)
+            required_percentage = int(pct) if pct > 0 else 75
+        except (TypeError, ValueError):
+            required_percentage = 75
+
         cur.execute("""
             INSERT INTO subjects (
                 user_id,
@@ -2282,7 +2290,7 @@ def _upsert_erp_subjects(cur, user_id, subjects, attendance) -> int:
             subject_name,
             present,
             total,
-            75,
+            required_percentage,
         ))
 
         imported += 1
@@ -2451,8 +2459,8 @@ def erp_sync(
 ):
     if payload.save_credentials and not crypto_util.is_configured():
         raise HTTPException(
-            status_code=500,
-            detail="Credential storage is not configured on the server.",
+            status_code=409,
+            detail="Encrypted credential storage is not configured. Sync will still work without saving credentials — uncheck 'Keep me synced' and try again.",
         )
     try:
         return _run_erp_sync(
