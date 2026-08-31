@@ -73,7 +73,10 @@ type RouteContext = {
 
 function backendUrl(path: string[], search: string) {
   const base = API_BASE.replace(/\/$/, "");
-  const joinedPath = path.map(encodeURIComponent).join("/");
+  // Next.js already decodes path segments before passing them to the handler,
+  // so joining directly is correct. Re-encoding here would double-encode
+  // characters like `(`, `)`, `&`, and `%` (e.g. subject "Maths (B)").
+  const joinedPath = path.join("/");
   return `${base}/${joinedPath}${search}`;
 }
 
