@@ -320,7 +320,36 @@ export default function ImportPage() {
       );
       applySyncResult(result);
     } catch (e) {
-      setErpError(e instanceof Error ? e.message : "Sync failed");
+      const msg = e instanceof Error ? e.message : "Sync failed";
+      // 409 with the credential-storage hint means the server can still sync,
+      // just not save the password. Auto-uncheck and retry once.
+      if (
+        keepSynced &&
+        msg.includes("Encrypted credential storage is not configured")
+      ) {
+        setKeepSynced(false);
+        try {
+          const retry = await erpSync(
+            {
+              erp_username: erpId.trim(),
+              erp_password: erpPass,
+              save_credentials: false,
+            },
+            appUser.id
+          );
+          applySyncResult(retry);
+          setErpMessage(
+            "Synced without saving credentials (storage not configured on server)."
+          );
+          return;
+        } catch (retryErr) {
+          setErpError(
+            retryErr instanceof Error ? retryErr.message : "Sync failed"
+          );
+          return;
+        }
+      }
+      setErpError(msg);
     } finally {
       setSyncing(false);
     }
@@ -555,6 +584,13 @@ export default function ImportPage() {
               />
               Keep me synced (save login securely for auto-sync)
             </label>
+
+            {!cryptoAvailable && (
+              <p className="text-xs text-amber-300/80">
+                Encrypted storage is unavailable on this deployment. Your password
+                will be used for this sync only and won't be saved.
+              </p>
+            )}
 
             <button
               onClick={handlePortalSync}
