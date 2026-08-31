@@ -326,7 +326,7 @@ if __name__ == "__main__":  # ponytail: manual self-check, run with real creds
         assert att["DS"] == {"totalsessions": 4, "presentSessionsCount": 3, "percentage": "75.00"}
         assert att["OS"] == {"totalsessions": 0, "presentSessionsCount": 0, "percentage": "0.00"}
 
-        today = date(2026, 8, 4)
+        today = date.today()
         entries, conflicts = _normalize_timetable([
             # normal period
             {"weekday": 1, "period_start": 1, "period_end": 1, "subject_name": "CN",
