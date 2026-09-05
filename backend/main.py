@@ -8,12 +8,14 @@ import logging
 import math
 import os
 import re
+import secrets
 import threading
 import time
 from collections import defaultdict, deque
 
 from database import get_conn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+import psycopg2
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
@@ -290,6 +292,33 @@ def require_notification_cron_secret(
         raise HTTPException(status_code=401, detail="Invalid notification cron secret")
 
 
+# ---------------------------------------------------------------------------
+# Buddy invite codes
+#
+# Students pair up by sharing a short code, not by searching a directory.
+# That keeps the user table non-enumerable: there is no endpoint that maps a
+# name or roll number to a user id, so the only way to reach someone else's
+# data is a code they chose to hand you.
+#
+# The alphabet drops 0/O/1/I/L so a code read off a phone screen and retyped
+# into WhatsApp can't land on the wrong student.
+# ---------------------------------------------------------------------------
+
+BUDDY_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+BUDDY_CODE_LENGTH = 6
+BUDDY_CODE_TTL = timedelta(hours=24)
+BUDDY_MAX_PER_USER = 20
+
+
+def generate_buddy_code() -> str:
+    return "".join(secrets.choice(BUDDY_CODE_ALPHABET) for _ in range(BUDDY_CODE_LENGTH))
+
+
+def normalize_buddy_code(raw: Any) -> str:
+    """Uppercase and strip so 'ab c-d3f' and 'ABCD3F' resolve alike."""
+    return re.sub(r"[^A-Z0-9]", "", clean_text(raw).upper())
+
+
 class ERPImportPayload(BaseModel):
     subjects: list[dict[str, Any]]
     attendance: dict[str, Any]
@@ -356,6 +385,13 @@ class CalendarPlanDay(BaseModel):
 
 class CalendarPlanPayload(BaseModel):
     days: list[CalendarPlanDay]
+
+
+class BuddyRedeemPayload(BaseModel):
+    # Deliberately looser than the code itself: someone pasting "abc-123" or
+    # "ABC 123" out of a chat should get normalised, not rejected. The exact
+    # length is enforced after normalize_buddy_code() strips separators.
+    code: str = Field(..., min_length=BUDDY_CODE_LENGTH, max_length=32)
 
 
 class SubscriptionCheckoutPayload(BaseModel):
@@ -1238,6 +1274,39 @@ def init_db(_: None = Depends(require_admin_db_routes_enabled)):
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS buddies (
+                    id SERIAL PRIMARY KEY,
+                    user_a INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    user_b INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT buddies_distinct CHECK (user_a <> user_b),
+                    CONSTRAINT buddies_ordered CHECK (user_a < user_b),
+                    UNIQUE (user_a, user_b)
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS buddy_invites (
+                    code TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    redeemed_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    redeemed_at TIMESTAMPTZ
+                );
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_buddies_user_b
+                ON buddies(user_b);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_buddy_invites_user_id
+                ON buddy_invites(user_id);
+            """)
+
+            cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
                 ON users (LOWER(email));
             """)
@@ -1438,6 +1507,39 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS buddies (
+                    id SERIAL PRIMARY KEY,
+                    user_a INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    user_b INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT buddies_distinct CHECK (user_a <> user_b),
+                    CONSTRAINT buddies_ordered CHECK (user_a < user_b),
+                    UNIQUE (user_a, user_b)
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS buddy_invites (
+                    code TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    redeemed_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    redeemed_at TIMESTAMPTZ
+                );
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_buddies_user_b
+                ON buddies(user_b);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_buddy_invites_user_id
+                ON buddy_invites(user_id);
             """)
 
             cur.execute("""
@@ -3138,3 +3240,552 @@ def calendar_plan(
         "simulated_sessions": total_simulated_sessions,
         "skipped_dates": skipped_dates,
     }
+
+
+# ---------------------------------------------------------------------------
+# Buddy
+#
+# Two students pair up with a single-use invite code, then ask "which day can
+# we BOTH afford to bunk?".
+#
+# Load shape matters here. The single-user loaders each check a connection out
+# of the pool (DB_POOL_MAX=10 on one uvicorn worker), so the obvious two-user
+# implementation would take four checkouts per request. Everything below runs
+# on ONE connection and pulls both students in one query per table via
+# `user_id = ANY(...)`, which makes a buddy request cheaper than /home-data.
+# ---------------------------------------------------------------------------
+
+
+def load_subjects_for_users(
+    conn,
+    user_ids: list[int],
+) -> dict[int, list[dict[str, Any]]]:
+    """Both students' subjects in one query, grouped by user id."""
+    grouped: dict[int, list[dict[str, Any]]] = {uid: [] for uid in user_ids}
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT user_id, subject_name, attended_classes, total_classes
+            FROM subjects
+            WHERE user_id = ANY(%s)
+            ORDER BY user_id, subject_name
+        """, (user_ids,))
+
+        for row in cur.fetchall():
+            grouped.setdefault(int(row["user_id"]), []).append(row)
+
+    return grouped
+
+
+def load_timetables_for_users(
+    conn,
+    user_ids: list[int],
+) -> dict[int, dict[str, list[dict[str, Any]]]]:
+    """Both students' day maps in one query, grouped by user id."""
+    rows_by_user: dict[int, list[dict[str, Any]]] = {uid: [] for uid in user_ids}
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT user_id, day_name, period_no, subject_name
+            FROM timetable
+            WHERE user_id = ANY(%s)
+              AND subject_name IS NOT NULL
+              AND TRIM(subject_name) != ''
+            ORDER BY user_id, period_no
+        """, (user_ids,))
+
+        for row in cur.fetchall():
+            rows_by_user.setdefault(int(row["user_id"]), []).append(row)
+
+    return {uid: build_day_map(rows) for uid, rows in rows_by_user.items()}
+
+
+def buddy_pair(user_id: int, buddy_id: int) -> tuple[int, int]:
+    """
+    Canonical (low, high) ordering.
+
+    Friendship is symmetric, so storing it ordered means one row per pair and
+    the UNIQUE(user_a, user_b) constraint does the deduplication for us — no
+    "A added B and B added A" double rows to reconcile later.
+    """
+    return (min(user_id, buddy_id), max(user_id, buddy_id))
+
+
+def fetch_buddy(conn, user_id: int, buddy_id: int) -> Optional[dict[str, Any]]:
+    """
+    Return the buddy's public identity, but only if the pair is actually
+    linked. Every endpoint that reads another student's attendance goes
+    through this first — the proxy proves who the CALLER is, and this proves
+    they're allowed to see the person they're asking about.
+    """
+    low, high = buddy_pair(user_id, buddy_id)
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT u.id, u.name, u.email
+            FROM buddies b
+            JOIN users u ON u.id = %s
+            WHERE b.user_a = %s AND b.user_b = %s
+        """, (buddy_id, low, high))
+
+        return cur.fetchone()
+
+
+def count_buddies(cur, user_id: int) -> int:
+    cur.execute("""
+        SELECT COUNT(*) AS n
+        FROM buddies
+        WHERE user_a = %s OR user_b = %s
+    """, (user_id, user_id))
+
+    row = cur.fetchone()
+    return int(row["n"]) if row else 0
+
+
+def describe_missed(classes: list[dict[str, Any]]) -> list[str]:
+    """Distinct subject names for a day, in period order."""
+    seen: list[str] = []
+
+    for item in classes:
+        name = clean_text(item.get("subject_name"))
+        if name and name not in seen:
+            seen.append(name)
+
+    return seen
+
+
+def build_buddy_day(
+    day: str,
+    my_subjects: list[dict[str, Any]],
+    my_classes: list[dict[str, Any]],
+    my_overall: float,
+    buddy_subjects: list[dict[str, Any]],
+    buddy_classes: list[dict[str, Any]],
+    buddy_overall: float,
+) -> dict[str, Any]:
+    my_sim = simulate_absence_for_subjects(my_subjects, my_classes)
+    buddy_sim = simulate_absence_for_subjects(buddy_subjects, buddy_classes)
+
+    my_drop = my_overall - my_sim["new_overall"]
+    buddy_drop = buddy_overall - buddy_sim["new_overall"]
+
+    return {
+        "day": day,
+        "you": {
+            "new_overall": round(my_sim["new_overall"], 2),
+            "drop_overall": round(my_drop, 2),
+            "classes_missed": len(my_classes),
+            "subjects_missed": describe_missed(my_classes),
+        },
+        "buddy": {
+            "new_overall": round(buddy_sim["new_overall"], 2),
+            "drop_overall": round(buddy_drop, 2),
+            "classes_missed": len(buddy_classes),
+            "subjects_missed": describe_missed(buddy_classes),
+        },
+        # Ranking keys, kept unrounded so near-ties order deterministically.
+        "_worst_drop": max(my_drop, buddy_drop),
+        "_total_drop": my_drop + buddy_drop,
+    }
+
+
+def compute_buddy_week(
+    my_subjects: list[dict[str, Any]],
+    my_day_map: dict[str, list[dict[str, Any]]],
+    buddy_subjects: list[dict[str, Any]],
+    buddy_day_map: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """
+    Rank the week by the WORSE of the two students' attendance drops.
+
+    Summing the two drops would happily recommend a day that costs one of you
+    almost nothing and the other 4% — which is not a day you'd actually bunk
+    together. Minimising the worst case picks the day that's genuinely safe
+    for both, and total drop only breaks ties.
+    """
+    my_overall = calc_overall(my_subjects)
+    buddy_overall = calc_overall(buddy_subjects)
+
+    days = [
+        build_buddy_day(
+            day,
+            my_subjects,
+            my_day_map.get(day, []),
+            my_overall,
+            buddy_subjects,
+            buddy_day_map.get(day, []),
+            buddy_overall,
+        )
+        for day in WEEKDAYS
+        if my_day_map.get(day) or buddy_day_map.get(day)
+    ]
+
+    result: dict[str, Any] = {
+        "current": {
+            "you": round(my_overall, 2),
+            "buddy": round(buddy_overall, 2),
+        },
+        "days": [],
+        "best_day": None,
+        "worst_day": None,
+    }
+
+    if not days:
+        return result
+
+    def rank_key(entry: dict[str, Any]):
+        return (
+            round(entry["_worst_drop"], 6),
+            round(entry["_total_drop"], 6),
+            WEEKDAYS.index(entry["day"]),
+        )
+
+    best = min(days, key=rank_key)
+    worst = max(days, key=rank_key)
+
+    for entry in days:
+        entry["worst_drop"] = round(entry["_worst_drop"], 2)
+        entry["total_drop"] = round(entry["_total_drop"], 2)
+        entry["is_best"] = entry["day"] == best["day"]
+        del entry["_worst_drop"]
+        del entry["_total_drop"]
+
+    result["days"] = days
+    result["best_day"] = best["day"]
+    result["worst_day"] = worst["day"]
+
+    return result
+
+
+@app.post("/users/{user_id}/buddy-invite")
+def create_buddy_invite(user_id: int, _: None = Depends(require_service_secret)):
+    """
+    Mint a fresh single-use code, retiring any the student hasn't spent yet.
+
+    Rotating on every call means a code pasted into the wrong group chat stops
+    working as soon as they generate a new one.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if count_buddies(cur, user_id) >= BUDDY_MAX_PER_USER:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"You can have at most {BUDDY_MAX_PER_USER} buddies.",
+                )
+
+            expires_at = datetime.now(ZoneInfo("UTC")) + BUDDY_CODE_TTL
+
+            # Retry on the astronomically unlikely primary-key collision
+            # rather than letting a 500 reach the student. The savepoint keeps
+            # a failed attempt from rolling back the whole transaction — a
+            # plain rollback here would also undo the rotation below.
+            for _attempt in range(5):
+                code = generate_buddy_code()
+
+                cur.execute("SAVEPOINT mint_code")
+
+                try:
+                    cur.execute("""
+                        INSERT INTO buddy_invites (code, user_id, expires_at)
+                        VALUES (%s, %s, %s)
+                    """, (code, user_id, expires_at))
+                    cur.execute("RELEASE SAVEPOINT mint_code")
+                    break
+                except psycopg2.IntegrityError:
+                    cur.execute("ROLLBACK TO SAVEPOINT mint_code")
+                    continue
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not generate an invite code. Please try again.",
+                )
+
+            # Retire any code they hadn't spent yet, so a code pasted into the
+            # wrong group chat stops working once they generate a new one.
+            cur.execute("""
+                DELETE FROM buddy_invites
+                WHERE user_id = %s AND redeemed_by IS NULL AND code <> %s
+            """, (user_id, code))
+
+            conn.commit()
+
+        return {
+            "code": code,
+            "expires_at": expires_at.isoformat(),
+            "expires_in_hours": int(BUDDY_CODE_TTL.total_seconds() // 3600),
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to create buddy invite for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Failed to create invite code")
+    finally:
+        conn.close()
+
+
+@app.get("/users/{user_id}/buddies")
+def list_buddies(user_id: int, _: None = Depends(require_service_secret)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.email,
+                    b.created_at
+                FROM buddies b
+                JOIN users u
+                  ON u.id = CASE WHEN b.user_a = %s THEN b.user_b ELSE b.user_a END
+                WHERE b.user_a = %s OR b.user_b = %s
+                ORDER BY u.name, u.id
+            """, (user_id, user_id, user_id))
+
+            buddies = [
+                {
+                    "id": int(row["id"]),
+                    "name": clean_text(row["name"]) or "Student",
+                    "email": clean_text(row["email"]),
+                    "since": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+                for row in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT code, expires_at
+                FROM buddy_invites
+                WHERE user_id = %s
+                  AND redeemed_by IS NULL
+                  AND expires_at > NOW()
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (user_id,))
+
+            invite_row = cur.fetchone()
+
+        return {
+            "buddies": buddies,
+            "max_buddies": BUDDY_MAX_PER_USER,
+            "invite": {
+                "code": invite_row["code"],
+                "expires_at": invite_row["expires_at"].isoformat(),
+            } if invite_row else None,
+        }
+
+    except Exception:
+        logger.exception("Failed to list buddies for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Failed to load buddies")
+    finally:
+        conn.close()
+
+
+@app.post("/users/{user_id}/buddies")
+def redeem_buddy_invite(
+    user_id: int,
+    payload: BuddyRedeemPayload,
+    _: None = Depends(require_service_secret),
+):
+    code = normalize_buddy_code(payload.code)
+
+    if len(code) != BUDDY_CODE_LENGTH:
+        raise HTTPException(status_code=400, detail="That code doesn't look right.")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Lock the invite row so two people racing the same code can't
+            # both redeem it.
+            cur.execute("""
+                SELECT code, user_id, expires_at, redeemed_by
+                FROM buddy_invites
+                WHERE code = %s
+                FOR UPDATE
+            """, (code,))
+
+            invite = cur.fetchone()
+
+            if not invite:
+                raise HTTPException(status_code=404, detail="Invalid invite code.")
+
+            if invite["redeemed_by"] is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="That code has already been used.",
+                )
+
+            if invite["expires_at"] <= datetime.now(ZoneInfo("UTC")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="That code has expired. Ask them for a new one.",
+                )
+
+            owner_id = int(invite["user_id"])
+
+            if owner_id == user_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="That's your own code — share it with a friend instead.",
+                )
+
+            low, high = buddy_pair(user_id, owner_id)
+
+            cur.execute("""
+                SELECT 1 FROM buddies WHERE user_a = %s AND user_b = %s
+            """, (low, high))
+
+            if cur.fetchone():
+                raise HTTPException(
+                    status_code=400,
+                    detail="You're already buddies.",
+                )
+
+            for candidate in (user_id, owner_id):
+                if count_buddies(cur, candidate) >= BUDDY_MAX_PER_USER:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "You've reached the buddy limit."
+                            if candidate == user_id
+                            else "They've reached their buddy limit."
+                        ),
+                    )
+
+            cur.execute("""
+                INSERT INTO buddies (user_a, user_b)
+                VALUES (%s, %s)
+            """, (low, high))
+
+            cur.execute("""
+                UPDATE buddy_invites
+                SET redeemed_by = %s, redeemed_at = NOW()
+                WHERE code = %s
+            """, (user_id, code))
+
+            cur.execute("SELECT id, name, email FROM users WHERE id = %s", (owner_id,))
+            owner = cur.fetchone()
+
+            conn.commit()
+
+        return {
+            "message": "Buddy added.",
+            "buddy": {
+                "id": owner_id,
+                "name": clean_text(owner["name"]) if owner else "Student",
+                "email": clean_text(owner["email"]) if owner else "",
+            },
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to redeem buddy code for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Failed to add buddy")
+    finally:
+        conn.close()
+
+
+@app.delete("/users/{user_id}/buddies/{buddy_id}")
+def remove_buddy(
+    user_id: int,
+    buddy_id: int,
+    _: None = Depends(require_service_secret),
+):
+    low, high = buddy_pair(user_id, buddy_id)
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM buddies
+                WHERE user_a = %s AND user_b = %s
+            """, (low, high))
+
+            removed = cur.rowcount
+            conn.commit()
+
+        if not removed:
+            raise HTTPException(status_code=404, detail="Buddy not found.")
+
+        return {"message": "Buddy removed."}
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to remove buddy %s for user %s", buddy_id, user_id)
+        raise HTTPException(status_code=500, detail="Failed to remove buddy")
+    finally:
+        conn.close()
+
+
+@app.get("/users/{user_id}/buddies/{buddy_id}/best-day")
+def buddy_best_day(
+    user_id: int,
+    buddy_id: int,
+    _: None = Depends(require_service_secret),
+):
+    """The best day for both students to bunk together."""
+    conn = get_conn()
+    try:
+        buddy = fetch_buddy(conn, user_id, buddy_id)
+
+        if not buddy:
+            # Same response whether they're a stranger or don't exist, so this
+            # can't be used to probe which user ids are real.
+            raise HTTPException(status_code=404, detail="Buddy not found.")
+
+        user_ids = [user_id, buddy_id]
+        subjects_by_user = load_subjects_for_users(conn, user_ids)
+        day_maps = load_timetables_for_users(conn, user_ids)
+
+        my_subjects = subjects_by_user.get(user_id, [])
+        buddy_subjects = subjects_by_user.get(buddy_id, [])
+
+        buddy_name = clean_text(buddy["name"]) or "Your buddy"
+
+        if not my_subjects:
+            raise HTTPException(
+                status_code=400,
+                detail="Add your subjects before planning with a buddy.",
+            )
+
+        if not buddy_subjects:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{buddy_name} hasn't added their subjects yet.",
+            )
+
+        week = compute_buddy_week(
+            my_subjects,
+            day_maps.get(user_id, {}),
+            buddy_subjects,
+            day_maps.get(buddy_id, {}),
+        )
+
+        if not week["days"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Neither of you has a timetable saved yet.",
+            )
+
+        return {
+            "buddy": {"id": buddy_id, "name": buddy_name},
+            **week,
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to compute buddy best day for %s and %s", user_id, buddy_id
+        )
+        raise HTTPException(status_code=500, detail="Failed to compute best day")
+    finally:
+        conn.close()
