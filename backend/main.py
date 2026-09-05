@@ -2457,19 +2457,31 @@ def erp_sync(
     payload: ERPSyncPayload,
     _: None = Depends(require_service_secret),
 ):
-    if payload.save_credentials and not crypto_util.is_configured():
-        raise HTTPException(
-            status_code=409,
-            detail="Encrypted credential storage is not configured. Sync will still work without saving credentials — uncheck 'Keep me synced' and try again.",
+    # Saving the password is a convenience on top of the sync, not a
+    # precondition for it. When ERP_CRED_KEY is missing we still sync and just
+    # report that the login could not be kept, rather than failing a request
+    # that would otherwise have succeeded.
+    save_credentials = payload.save_credentials and crypto_util.is_configured()
+    degraded = payload.save_credentials and not save_credentials
+    if degraded:
+        logger.warning(
+            "ERP_CRED_KEY not configured; syncing user %s without saving credentials",
+            user_id,
         )
     try:
-        return _run_erp_sync(
+        result = _run_erp_sync(
             user_id,
             payload.erp_username,
             payload.erp_password,
             payload.institute_slug or campushub.DEFAULT_SLUG,
-            save_credentials=payload.save_credentials,
+            save_credentials=save_credentials,
         )
+        if degraded:
+            result["credentials_error"] = (
+                "Your attendance synced, but the login could not be saved for "
+                "auto-sync (server-side encrypted storage is not configured)."
+            )
+        return result
     except campushub.ERPError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message)
     except crypto_util.CredentialCryptoError:
@@ -2562,12 +2574,16 @@ def erp_status(user_id: int, _: None = Depends(require_service_secret)):
     finally:
         conn.close()
 
+    # Lets /import tell students up front whether "Keep me synced" can work.
+    crypto_available = crypto_util.is_configured()
+
     if not row:
-        return {"saved": False}
+        return {"saved": False, "crypto_available": crypto_available}
 
     last_synced = row.get("last_synced_at")
     return {
         "saved": True,
+        "crypto_available": crypto_available,
         "erp_username": row.get("erp_username"),
         "institute_slug": row.get("institute_slug"),
         "last_synced_at": last_synced.isoformat() if last_synced else None,

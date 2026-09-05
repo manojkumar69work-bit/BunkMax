@@ -508,10 +508,15 @@ export type ErpSyncResult = {
   average?: number;
   student?: { name?: string; prn?: string; stuid?: number };
   credentials_saved?: boolean;
+  // Set when the sync succeeded but the login could not be persisted
+  // (server-side encrypted storage unconfigured). A warning, not a failure.
+  credentials_error?: string;
 };
 
 export type ErpStatus = {
   saved: boolean;
+  // False when the server has no ERP_CRED_KEY, so logins cannot be saved.
+  crypto_available?: boolean;
   erp_username?: string;
   institute_slug?: string;
   last_synced_at?: string | null;

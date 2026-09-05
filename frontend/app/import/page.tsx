@@ -256,6 +256,9 @@ export default function ImportPage() {
   const [keepSynced, setKeepSynced] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [erpStatus, setErpStatus] = useState<ErpStatus | null>(null);
+  // Assume saving works until the status call says otherwise, so the warning
+  // never flashes on a healthy deployment.
+  const cryptoAvailable = erpStatus?.crypto_available !== false;
   const [erpMessage, setErpMessage] = useState("");
   const [erpError, setErpError] = useState("");
   const [erpConflicts, setErpConflicts] = useState<string[]>([]);
@@ -285,12 +288,15 @@ export default function ImportPage() {
 
   function applySyncResult(result: ErpSyncResult) {
     setErpError("");
-    setErpMessage(
+    const base =
       result.subjects_imported > 0
         ? `${result.message}${
             result.average ? ` Average attendance ${result.average}%.` : ""
           }`
-        : result.message
+        : result.message;
+    // The sync worked; a credential-storage problem is only a footnote on it.
+    setErpMessage(
+      result.credentials_error ? `${base} ${result.credentials_error}` : base
     );
     setErpConflicts(result.timetable_conflicts ?? []);
     setReLogin(false);

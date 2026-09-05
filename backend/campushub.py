@@ -38,6 +38,8 @@ WEEKDAY_NAMES = {
     4: "Thursday", 5: "Friday", 6: "Saturday", 0: "Sunday",
 }
 MAX_PERIOD = 6  # BunkMax's timetable table constrains period_no to 1..6
+# CampusHub's per-record status vocabulary; `late` still counts as attended.
+ATTENDED_STATUSES = {"present", "late"}
 
 
 class ERPError(Exception):
@@ -54,11 +56,18 @@ def _headers(token: str = ANON_KEY) -> dict:
 
 
 def _login(session: requests.Session, email: str, password: str) -> str:
-    """Return a Supabase access token, or raise ERPError on bad credentials."""
+    """
+    Sign in to CampusHub and return the bearer token its API routes expect.
+
+    CampusHub has moved off Supabase auth onto **AWS Cognito**. The portal
+    posts to its own `/api/auth/cognito-signin` route and then sends the
+    **`idToken`** (not `accessToken`) as `Authorization: Bearer` on every
+    `/api/student/*` call — see `authHeader()`/`getAccessToken()` in the bundle.
+    """
     try:
         resp = session.post(
-            f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
-            headers={"apikey": ANON_KEY, "Content-Type": "application/json"},
+            f"{CAMPUSHUB_BASE}/api/auth/cognito-signin",
+            headers={"Content-Type": "application/json"},
             json={"email": email, "password": password},
             timeout=_TIMEOUT,
         )
@@ -69,36 +78,148 @@ def _login(session: requests.Session, email: str, password: str) -> str:
         raise ERPError("Could not reach the college portal. Please try again later.", 502) from exc
 
     if resp.status_code == 200:
-        token = (resp.json() or {}).get("access_token")
+        body = resp.json() or {}
+        # First-time / admin-reset accounts must set a password in the portal
+        # before any API route will serve them.
+        if body.get("challenge") == "NEW_PASSWORD_REQUIRED":
+            raise ERPError(
+                "CampusHub needs you to set a new password. Sign in at "
+                "campushub.mlrit.ac.in once, then sync again.",
+                401,
+            )
+        token = body.get("idToken")
         if token:
             return token
         raise ERPError("Portal login response was incomplete.", 502)
 
-    if resp.status_code in (400, 401):
+    if resp.status_code in (400, 401, 403):
         raise ERPError("Invalid ERP roll number or password.", 401)
     logger.warning("CampusHub login unexpected status %s: %s", resp.status_code, resp.text[:200])
     raise ERPError("The college portal returned an unexpected response.", 502)
 
 
-def _fetch_summary(session: requests.Session, token: str, roll: str) -> list[dict]:
-    url = (
-        f"{SUPABASE_URL}/rest/v1/student_attendance_summary"
-        f"?student_id=eq.{roll}"
-        "&select=subject_name,subject_code,total_classes,classes_attended,attendance_percentage"
-    )
+def _fetch_attendance_module(session: requests.Session, token: str) -> dict:
+    """
+    CampusHub's own attendance module — the authoritative source.
+
+    `GET /api/student/attendance` (Bearer idToken, no params: the route derives
+    the student from the token) returns the portal's own aggregate, already
+    scoped to the **current semester**:
+
+        {"student": {...},
+         "overall_stats": {attendance_percentage, classes_attended,
+                           total_classes, days_needed_for_75_percent},
+         "subject_wise_attendance": [{subject_name, subject_code,
+                                      total_classes, classes_attended,
+                                      attendance_percentage}],
+         "records": [{date, subject_name, subject_code, status,
+                      period_number, faculty_name}],
+         "recent_attendance": [ ...same shape... ]}
+
+    Returns {} when the route is unavailable, so callers can fall back.
+    """
+    try:
+        resp = session.get(
+            f"{CAMPUSHUB_BASE}/api/student/attendance",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=_TIMEOUT,
+        )
+    except requests.Timeout as exc:
+        raise ERPError("The college portal timed out. Please try again.", 504) from exc
+    except requests.RequestException as exc:
+        logger.warning("CampusHub attendance module request failed: %s", exc)
+        raise ERPError("Could not reach the college portal. Please try again later.", 502) from exc
+
+    if resp.status_code == 401:
+        raise ERPError("Your portal session was rejected. Please sync again.", 401)
+    if resp.status_code != 200:
+        logger.warning(
+            "CampusHub attendance module status %s: %s", resp.status_code, resp.text[:200]
+        )
+        return {}
+    body = resp.json()
+    return body if isinstance(body, dict) else {}
+
+
+def _get_rows(session: requests.Session, token: str, url: str, what: str) -> list:
+    """GET a Supabase REST URL, returning the decoded list (never None)."""
     try:
         resp = session.get(url, headers=_headers(token), timeout=_TIMEOUT)
     except requests.Timeout as exc:
         raise ERPError("The college portal timed out. Please try again.", 504) from exc
     except requests.RequestException as exc:
-        logger.warning("CampusHub attendance request failed: %s", exc)
+        logger.warning("CampusHub %s request failed: %s", what, exc)
         raise ERPError("Could not reach the college portal. Please try again later.", 502) from exc
 
     if resp.status_code != 200:
-        logger.warning("CampusHub attendance status %s: %s", resp.status_code, resp.text[:200])
+        logger.warning("CampusHub %s status %s: %s", what, resp.status_code, resp.text[:200])
         raise ERPError("The college portal returned an unexpected response.", 502)
     body = resp.json()
     return body if isinstance(body, list) else []
+
+
+def _fetch_records(session: requests.Session, token: str, roll: str) -> list[dict]:
+    """
+    Current CampusHub attendance model, aggregated to summary rows.
+
+    Faculty now mark attendance per class *session*: `attendance_sessions` holds
+    the session (subject, date, period, status) and `attendance_records` holds
+    one present/absent row per student in it, keyed by `student_roll_number`.
+    The legacy `attendance` table and its `student_attendance_summary` view are
+    frozen, so we aggregate the session rows ourselves.
+
+    Only `closed` sessions count — an `open` one is still being marked and its
+    partial rows would understate the total.
+    """
+    url = (
+        f"{SUPABASE_URL}/rest/v1/attendance_records"
+        f"?student_roll_number=eq.{roll}"
+        "&select=status,attendance_sessions!inner(subject_name,subject_code,status)"
+        "&attendance_sessions.status=eq.closed"
+    )
+    return _aggregate_records(_get_rows(session, token, url, "attendance records"))
+
+
+def _aggregate_records(rows: list) -> list[dict]:
+    """Group per-session records by subject into `_normalize_attendance` rows."""
+    # subject name -> [code, total, attended]
+    agg: dict[str, list] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        sess = r.get("attendance_sessions")
+        if not isinstance(sess, dict):
+            continue
+        name = (sess.get("subject_name") or sess.get("subject_code") or "").strip()
+        if not name:
+            continue
+        entry = agg.setdefault(name, [sess.get("subject_code"), 0, 0])
+        entry[1] += 1
+        # The portal counts a late arrival as attended, so we must too.
+        if str(r.get("status") or "").strip().lower() in ATTENDED_STATUSES:
+            entry[2] += 1
+
+    return [
+        {
+            "subject_name": name,
+            "subject_code": code,
+            "total_classes": total,
+            "classes_attended": attended,
+            # Left to _normalize_attendance so one rounding rule covers both sources.
+            "attendance_percentage": None,
+        }
+        for name, (code, total, attended) in agg.items()
+    ]
+
+
+def _fetch_summary(session: requests.Session, token: str, roll: str) -> list[dict]:
+    """Legacy pre-migration aggregate. Kept as a fallback for older history."""
+    url = (
+        f"{SUPABASE_URL}/rest/v1/student_attendance_summary"
+        f"?student_id=eq.{roll}"
+        "&select=subject_name,subject_code,total_classes,classes_attended,attendance_percentage"
+    )
+    return _get_rows(session, token, url, "attendance summary")
 
 
 def _fetch_profile(session: requests.Session, roll: str) -> dict:
@@ -287,7 +408,36 @@ def fetch_all(username: str, password: str, slug: str = DEFAULT_SLUG,
     session = requests.Session()
     try:
         token = _login(session, f"{roll.lower()}@{EMAIL_DOMAIN}", password)
-        result = _normalize_attendance(_fetch_summary(session, token, roll), roll)
+
+        # Preferred: CampusHub's own attendance module, already aggregated and
+        # scoped to the current semester.
+        module = _fetch_attendance_module(session, token)
+        rows = module.get("subject_wise_attendance") or []
+        overall = module.get("overall_stats") or {}
+
+        if not rows:
+            # The module gave us nothing. Fall back to reading Supabase
+            # directly with the anon key — first the current session tables,
+            # then the frozen legacy view for pre-migration history. Neither
+            # accepts the Cognito idToken, so they use ANON_KEY.
+            rows = _fetch_records(session, ANON_KEY, roll) or _fetch_summary(
+                session, ANON_KEY, roll
+            )
+
+        result = _normalize_attendance(rows, roll)
+
+        # The portal's own overall figure is total-based; our fallback average
+        # is a mean of subject percentages. Prefer the portal's when present.
+        pct = overall.get("attendance_percentage")
+        if pct is not None:
+            try:
+                result["average"] = round(float(pct), 2)
+            except (TypeError, ValueError):
+                pass
+
+        student = module.get("student")
+        if isinstance(student, dict) and student.get("name"):
+            result["student"]["name"] = student["name"]
         result["timetable"] = []
         result["timetable_conflicts"] = []
 
@@ -325,6 +475,25 @@ if __name__ == "__main__":  # ponytail: manual self-check, run with real creds
         ], "24R21A0522")["attendance"]
         assert att["DS"] == {"totalsessions": 4, "presentSessionsCount": 3, "percentage": "75.00"}
         assert att["OS"] == {"totalsessions": 0, "presentSessionsCount": 0, "percentage": "0.00"}
+
+        # Session-record aggregation: `late` counts as attended, `absent` does not.
+        def _rec(status, name, code="C1"):
+            return {"status": status,
+                    "attendance_sessions": {"subject_name": name, "subject_code": code,
+                                            "status": "closed"}}
+        agg = _aggregate_records([
+            _rec("present", "X"), _rec("late", "X"), _rec("absent", "X"),
+            _rec("PRESENT", "Y"),                      # case-insensitive
+            {"status": "present", "attendance_sessions": None},   # unjoined row
+            "not-a-dict",
+        ])
+        by_name = {r["subject_name"]: r for r in agg}
+        assert by_name["X"]["total_classes"] == 3, agg
+        assert by_name["X"]["classes_attended"] == 2, agg
+        assert by_name["Y"]["classes_attended"] == 1, agg
+        assert set(by_name) == {"X", "Y"}, agg
+        # and it feeds the shared normalizer cleanly
+        assert _normalize_attendance(agg, "R")["attendance"]["X"]["percentage"] == "66.67"
 
         today = date.today()
         entries, conflicts = _normalize_timetable([

@@ -17,29 +17,92 @@ CampusHub (`campushub.mlrit.ac.in`) is a Next.js SPA backed **directly by
 Supabase** — there is no bespoke attendance API. The contract below was decoded
 from the shipped JS bundles and verified live.
 
-**Auth**
+**Auth — AWS Cognito**
 
-Supabase email/password. The portal's own login takes a roll number and maps it
-to an email server-side; we skip that hop and construct the email directly.
+CampusHub has **migrated off Supabase auth onto AWS Cognito**. The portal posts
+to its own sign-in route and then sends the **`idToken`** (not `accessToken`)
+as `Authorization: Bearer` on every `/api/student/*` call — see `authHeader()`
+/ `getAccessToken()` in the shipped bundle. Email is still
+`<roll-lowercase>@mlrit.ac.in`, so we construct it directly.
 
 | # | Endpoint | Body / params | Returns |
 |---|----------|---------------|---------|
-| 1 | `POST {SUPABASE_URL}/auth/v1/token?grant_type=password` (header `apikey`) | `{email: "<roll-lowercase>@mlrit.ac.in", password}` | `access_token` |
+| 1 | `POST campushub.mlrit.ac.in/api/auth/cognito-signin` | `{email, password}` | `{idToken, accessToken, refreshToken, expiresIn}` |
 
-`400`/`401` here means bad credentials and nothing else, so it maps cleanly to
-a user-facing "Invalid ERP roll number or password".
+- `400`/`401`/`403` means bad credentials — maps to "Invalid ERP roll number or
+  password".
+- A `200` carrying `{challenge: "NEW_PASSWORD_REQUIRED", session}` means the
+  account has never set a password. No API route will serve it, so we ask the
+  student to sign in to the portal once first.
+- The old Supabase password grant still *answers*, but students are no longer
+  provisioned there — do not use it.
 
 **Attendance**
 
+Use **CampusHub's own attendance module**. It is server-aggregated and already
+scoped to the **current semester**, so BunkMax does no date filtering.
+
 | # | Endpoint | Params | Returns |
 |---|----------|--------|---------|
-| 2 | `GET {SUPABASE_URL}/rest/v1/student_attendance_summary` (headers `apikey` + `Authorization: Bearer <access_token>`) | `student_id=eq.<ROLL-UPPER>`, `select=subject_name,subject_code,total_classes,classes_attended,attendance_percentage` | `[{subject_name, subject_code, total_classes, classes_attended, attendance_percentage}]` |
+| 2 | `GET campushub.mlrit.ac.in/api/student/attendance` (header `Authorization: Bearer <idToken>`) | **none** — the route derives the student from the token | see below |
 
-> The view is world-readable to any authenticated (or anon) user, so the client
-> **must** filter by `student_id` itself. Live rows are keyed by **roll
-> number**; a few stray demo rows use auth-uid uuids. The raw per-session table
-> `attendance` (student_id, subject, class_name, date, present) also exists —
-> the summary view is the aggregate we consume.
+```json
+{
+  "student": { "roll_number": "…", "name": "…", "department": "CSE",
+               "section": "A", "year": "I", "semester": "I" },
+  "attendance_from": "2026-08-11",
+  "overall_stats": { "total_classes": 156, "classes_attended": 68,
+                     "attendance_percentage": 43.6,
+                     "days_needed_for_75_percent": 196 },
+  "overall": { "present": 68, "absent": 40, "late": 0,
+               "total": 156, "percentage": 43.6 },
+  "subject_wise_attendance": [{ "subject_name": "…", "subject_code": "A7CS01",
+                                "total_classes": 55, "classes_attended": 21,
+                                "attendance_percentage": 38.2 }],
+  "subjects": [{ "subject_code": "A7CS01", "subject_name": "…", "faculty": "…",
+                 "present": 21, "absent": 24, "late": 0,
+                 "total": 55, "percentage": 38.2 }],
+  "daily":   [{ "date": "2026-08-13", "present": 3, "absent": 3, "late": 0,
+                "status": "partial" }],
+  "records": [{ "date": "2026-09-03", "subject_code": "A7BS01",
+                "subject_name": "…", "status": "present", "remarks": null }],
+  "recent_attendance": [ "…same shape as records…" ]
+}
+```
+
+- `attendance_from` is the **semester start** the portal is counting from, so
+  the window is the portal's business, not ours.
+- `overall_stats` / `subject_wise_attendance` are the BunkMax-shaped aliases;
+  `overall` / `subjects` carry the same numbers plus `faculty` and a
+  present/absent/late split. `daily` is a per-day rollup
+  (`status`: `present` / `absent` / `partial`).
+- **`total` counts scheduled classes, not just marked ones.** Verified live:
+  `present 68 + absent 40 = 108`, but `total = 156` — 48 classes are on the
+  timetable with no mark either way, and the portal counts them against the
+  student (`68/156 = 43.6%`, not `68/108 = 63%`). We take the portal's figures
+  verbatim so BunkMax shows the same number the college does.
+- `records` rows carry `remarks`; `period_number` / `faculty_name` appear in
+  the portal's own grouping code but are **not** in the payload — treat them as
+  optional.
+
+- `subject_wise_attendance` is exactly the shape `_normalize_attendance` wants.
+- `overall_stats.attendance_percentage` is **total-based**, so we prefer it over
+  our own mean-of-subject-percentages average.
+- Per-record `status` is `present` / `late` / `absent`, and the portal counts
+  **`late` as attended** (`ATTENDED_STATUSES`) — so we must too.
+- `records` supersedes `recent_attendance` when non-empty; the portal reads
+  `records` first and falls back the same way.
+
+**Fallback chain** (used only when the module returns no subjects):
+
+| # | Source | Notes |
+|---|--------|-------|
+| 2a | `GET {SUPABASE_URL}/rest/v1/attendance_records` + `attendance_sessions!inner(...)`, `attendance_sessions.status=eq.closed` | Current session tables, keyed by `student_roll_number`. Only `closed` sessions count — an `open` one is mid-marking and would understate the total. |
+| 2b | `GET {SUPABASE_URL}/rest/v1/student_attendance_summary` | Frozen pre-migration view (`student_id`, mixed roll/uuid keys). Kept so older history survives. |
+
+> Both fallbacks read Supabase directly and are queried with **`ANON_KEY`** —
+> a Cognito `idToken` does not authenticate Supabase. They are world-readable,
+> so the client **must** filter by roll number itself.
 
 **Timetable**
 
@@ -49,7 +112,7 @@ students, so we use CampusHub's own server route, which resolves names for us.
 | # | Endpoint | Params | Returns |
 |---|----------|--------|---------|
 | 3 | `POST campushub.mlrit.ac.in/api/auth/login` | `{rollNumber}` | `user` profile — `department`, `section`, `year`, `semester`, `name` |
-| 4 | `GET campushub.mlrit.ac.in/api/student/timetable` (header `Authorization: Bearer <access_token>`) | `department`, `section`, `year`, `semester` | `{classes: [{weekday, period_start, period_end, subject_name, subject_code, is_recurring, start_date, end_date}]}` |
+| 4 | `GET campushub.mlrit.ac.in/api/student/timetable` (header `Authorization: Bearer <idToken>`) | `department`, `section`, `year`, `semester` | `{classes: [{weekday, period_start, period_end, subject_name, subject_code, is_recurring, start_date, end_date}]}` |
 
 Timetable normalization rules (`_normalize_timetable`):
 
@@ -177,9 +240,14 @@ CREATE TABLE IF NOT EXISTS erp_credentials (
   + last-synced only).
 - If the key rotates, old ciphertext can't be decrypted — the user re-enters
   once (handled with a clean `409`).
+- If `ERP_CRED_KEY` is **absent**, the sync still runs — the password is used
+  for that request only and never persisted. `erp-sync` returns success with a
+  `credentials_error` note (shown as a footnote on the success message), and
+  `erp-status` reports `crypto_available: false` so `/import` can warn up front.
+  A missing key must never fail an otherwise-valid sync.
 - The Supabase publishable (anon) key is not a secret — it ships in CampusHub's
-  own JS bundle — but it grants read access to the world-readable summary view,
-  which is why the client always filters by the caller's own `student_id`.
+  own JS bundle — but it grants read access to the attendance tables, which is
+  why the client always filters by the caller's own roll number.
 - Attendance sync is **non-destructive**: it upserts only the subjects it
   fetches (`ON CONFLICT (user_id, subject_name)`) and never deletes existing
   ones. The timetable sync is the one deliberate exception (see above).
