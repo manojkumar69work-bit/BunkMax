@@ -1787,6 +1787,36 @@ def migrate_db(_: None = Depends(require_admin_db_routes_enabled)):
         conn.close()
 
 
+def is_allowed_login_email(email: str) -> bool:
+    """
+    Real students are @mlrit.ac.in, full stop.
+
+    DEV_ALLOWED_EMAILS punches a hole for test accounts, but ONLY when
+    APP_ENV says this is a development box — the same switch get_allowed_origins
+    uses. On Render, APP_ENV is unset/production, so the variable is inert even
+    if it somehow ends up configured there.
+    """
+    if email.endswith("@mlrit.ac.in"):
+        return True
+
+    app_env = os.getenv("APP_ENV", "").strip().lower()
+
+    if app_env not in {"development", "dev", "local", "test"}:
+        return False
+
+    allowed = {
+        entry.strip().lower()
+        for entry in os.getenv("DEV_ALLOWED_EMAILS", "").split(",")
+        if entry.strip()
+    }
+
+    if email in allowed:
+        logger.warning("Dev-only login allowed for non-MLRIT account: %s", email)
+        return True
+
+    return False
+
+
 @app.post("/auth/google-user")
 def auth_google_user(
     payload: GoogleUserPayload,
@@ -1795,7 +1825,7 @@ def auth_google_user(
     email = clean_text(payload.email).lower()
     name = clean_text(payload.name) or "Student"
 
-    if not email.endswith("@mlrit.ac.in"):
+    if not is_allowed_login_email(email):
         raise HTTPException(status_code=403, detail="Only MLRIT accounts allowed")
 
     conn = get_conn()
