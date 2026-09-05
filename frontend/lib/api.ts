@@ -941,3 +941,83 @@ export async function spidySearch(query: string) {
   });
   return handleResponse<{ results: SpidySearchResult[]; message: string }>(res);
 }
+
+// ─── Buddy Types ───────────────────────────────────────
+export type Buddy = {
+  id: number;
+  name: string;
+  email: string;
+  since: string | null;
+};
+
+export type BuddyInvite = {
+  code: string;
+  expires_at: string;
+};
+
+export type BuddyListResponse = {
+  buddies: Buddy[];
+  max_buddies: number;
+  invite: BuddyInvite | null;
+};
+
+export type BuddySide = {
+  new_overall: number;
+  drop_overall: number;
+  classes_missed: number;
+  subjects_missed: string[];
+};
+
+export type BuddyDay = {
+  day: string;
+  you: BuddySide;
+  buddy: BuddySide;
+  worst_drop: number;
+  total_drop: number;
+  is_best: boolean;
+};
+
+export type BuddyPlanResponse = {
+  buddy: { id: number; name: string };
+  current: { you: number; buddy: number };
+  days: BuddyDay[];
+  best_day: string | null;
+  worst_day: string | null;
+};
+
+// ─── Buddy Functions ───────────────────────────────────
+export async function getBuddies(userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/buddies`);
+  return handleResponse<BuddyListResponse>(res);
+}
+
+export async function createBuddyInvite(userId: number) {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/buddy-invite`, {
+    method: "POST",
+  });
+  return handleResponse<BuddyInvite & { expires_in_hours: number }>(res);
+}
+
+export async function redeemBuddyCode(userId: number, code: string) {
+  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/buddies`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  return handleResponse<{ message: string; buddy: Buddy }>(res);
+}
+
+export async function removeBuddy(userId: number, buddyId: number) {
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/buddies/${buddyId}`,
+    { method: "DELETE" },
+  );
+  return handleResponse<{ message: string }>(res);
+}
+
+export async function getBuddyBestDay(userId: number, buddyId: number) {
+  const res = await fetchWithRetry(
+    `${API_BASE}/users/${userId}/buddies/${buddyId}/best-day`,
+  );
+  return handleResponse<BuddyPlanResponse>(res);
+}

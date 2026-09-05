@@ -37,6 +37,9 @@ const CACHEABLE_GETS: CacheableSpec[] = [
   { pattern: /^\/users\/\d+\/tomorrow$/, sMaxAge: 15, swr: 120 },
   { pattern: /^\/users\/\d+\/best-day$/, sMaxAge: 15, swr: 120 },
   { pattern: /^\/users\/\d+\/worst-day$/, sMaxAge: 15, swr: 120 },
+  // Two students' attendance moves at most once a day, so a longer window is
+  // safe here — and this is the one read that touches two users' rows.
+  { pattern: /^\/users\/\d+\/buddies\/\d+\/best-day$/, sMaxAge: 60, swr: 300 },
   { pattern: /^\/users\/\d+$/, sMaxAge: 60, swr: 300 },
   { pattern: /^\/users\/\d+\/subscription$/, sMaxAge: 60, swr: 300 },
 ];
