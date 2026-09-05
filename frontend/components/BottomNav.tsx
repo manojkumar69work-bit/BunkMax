@@ -5,14 +5,16 @@ import { usePathname } from "next/navigation";
 import {
   Home,
   Calendar,
-  BookOpen,
+  Users,
   Zap,
   User,
 } from "lucide-react";
 
+// Subjects live inside /schedule as a tab, which frees this slot for Buddy
+// without growing the grid past five columns.
 const tabs = [
-  { href: "/subjects", label: "Subject", icon: BookOpen },
   { href: "/schedule", label: "Schedule", icon: Calendar },
+  { href: "/buddy", label: "Buddy", icon: Users },
   { href: "/", label: "Home", icon: Home, center: true },
   { href: "/plan", label: "Plan", icon: Zap },
   { href: "/profile", label: "Profile", icon: User },

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import BottomNav from "@/components/BottomNav";
+import SubjectsManager from "@/components/SubjectsManager";
 import {
   getSubjects,
   getTimetable,
@@ -18,6 +19,7 @@ const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
 const PERIODS = 6;
 
 type TimetableMap = Record<string, string[]>;
+type Tab = "timetable" | "subjects";
 
 function normalizeTimetable(data: ScheduleEntry[]): TimetableMap {
   const map: TimetableMap = {};
@@ -40,7 +42,27 @@ function normalizeTimetable(data: ScheduleEntry[]): TimetableMap {
 }
 
 export default function SchedulePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="app-shell">
+          <SchedulePageSkeleton />
+          <BottomNav />
+        </div>
+      }
+    >
+      <ScheduleView />
+    </Suspense>
+  );
+}
+
+function ScheduleView() {
   const { appUser, loadingUser } = useAppUser();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // ?tab=subjects keeps the old /subjects bookmarks landing on the right view.
+  const tab: Tab = searchParams.get("tab") === "subjects" ? "subjects" : "timetable";
 
   const [subjects, setSubjects] = useState<SubjectResponse[]>([]);
   const [timetable, setTimetable] = useState<TimetableMap>({});
@@ -72,6 +94,14 @@ export default function SchedulePage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function switchTab(next: Tab) {
+    setMessage("");
+    setError("");
+    router.replace(next === "subjects" ? "/schedule?tab=subjects" : "/schedule", {
+      scroll: false,
+    });
   }
 
   function updateCell(index: number, value: string) {
@@ -130,16 +160,6 @@ export default function SchedulePage() {
     0
   );
 
-  const lowestSubjects = [...subjects]
-    .sort((a, b) => {
-      const aPct =
-        a.total_classes > 0 ? a.attended_classes / a.total_classes : 0;
-      const bPct =
-        b.total_classes > 0 ? b.attended_classes / b.total_classes : 0;
-      return aPct - bPct;
-    })
-    .slice(0, 4);
-
   if (loadingUser) {
     return <FullScreenLoader label="Loading BunkMax..." />;
   }
@@ -149,9 +169,7 @@ export default function SchedulePage() {
       <div className="auth-shell">
         <div className="auth-card">
           <h1 className="text-2xl font-bold">BunkMax</h1>
-          <p className="text-sm text-gray-300">
-            Please login to continue.
-          </p>
+          <p className="text-sm text-gray-300">Please login to continue.</p>
           <a
             href="/login"
             className="primary-btn inline-flex items-center justify-center px-4"
@@ -163,114 +181,159 @@ export default function SchedulePage() {
     );
   }
 
-  if (loading) {
-    return (
-      <div className="app-shell">
-        <SchedulePageSkeleton />
-        <BottomNav />
-      </div>
-    );
-  }
-
   return (
     <div className="app-shell">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">My Schedule</h1>
         <p className="text-sm text-gray-400 mt-1">
-          Select a day and edit its periods
+          {tab === "timetable"
+            ? "Select a day and edit its periods"
+            : "Manage attendance for each subject"}
         </p>
       </div>
 
-      {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
-          {error}
-        </div>
-      )}
+      <div
+        role="tablist"
+        aria-label="Schedule sections"
+        className="grid grid-cols-2 gap-1 rounded-2xl border border-[#2f3336] bg-[#16181c] p-1"
+      >
+        {(
+          [
+            ["timetable", "Timetable"],
+            ["subjects", "Subjects"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={tab === value}
+            onClick={() => switchTab(value)}
+            className={`rounded-xl px-4 py-2.5 text-sm font-bold transition ${
+              tab === value
+                ? "bg-[#1d9bf0] text-white shadow-[0_8px_20px_rgba(29,155,240,0.28)]"
+                : "text-[#71767b] hover:bg-white/5 hover:text-white"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-      {message && (
-        <div className="rounded-xl border border-green-500/30 bg-green-500/10 p-3 text-sm text-green-200">
-          {message}
-        </div>
-      )}
-
-      {subjects.length === 0 ? (
-        <div className="glass-card p-4 text-sm text-gray-400">
-          Add subjects first before creating your schedule.
-        </div>
+      {tab === "subjects" ? (
+        <SubjectsManager
+          userId={appUser.id}
+          // Keep the timetable dropdown in step with edits made here.
+          onSubjectsChange={(next) => setSubjects(next as SubjectResponse[])}
+        />
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-3">
-            <div className="glass-card p-3">
-              <p className="metric-title">Subjects</p>
-              <p className="metric-value">{subjects.length}</p>
+          {error && (
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+              {error}
             </div>
-            <div className="glass-card p-3">
-              <p className="metric-title">Periods</p>
-              <p className="metric-value">{totalScheduledPeriods}</p>
+          )}
+
+          {message && (
+            <div className="rounded-xl border border-green-500/30 bg-green-500/10 p-3 text-sm text-green-200">
+              {message}
             </div>
-            <div className="glass-card p-3">
-              <p className="metric-title">{selectedDay.slice(0, 3)}</p>
-              <p className="metric-value">{selectedDayFilledPeriods}</p>
+          )}
+
+          {loading ? (
+            <SchedulePageSkeleton />
+          ) : subjects.length === 0 ? (
+            <div className="glass-card p-4 space-y-3">
+              <p className="text-sm text-gray-400">
+                Add subjects first before creating your schedule.
+              </p>
+              <button
+                type="button"
+                onClick={() => switchTab("subjects")}
+                className="secondary-btn"
+              >
+                Go to Subjects
+              </button>
             </div>
-          </div>
-
-          <div className="section-title">Timetable</div>
-
-          <div className="grid grid-cols-2 gap-3">
-            {DAYS.map((day) => {
-              const active = selectedDay === day;
-              const count = daySubjectCounts[day] || 0;
-
-              return (
-                <button
-                  key={day}
-                  type="button"
-                  onClick={() => {
-                    setSelectedDay(day);
-                    setMessage("");
-                  }}
-                  className={`rounded-lg border px-4 py-4 text-left transition ${
-                    active
-                      ? "border-[#1d9bf0]/45 bg-[#1d9bf0]/12 text-white"
-                      : "border-[#2f3336] bg-[#16181c] text-gray-300 hover:bg-[#202327]"
-                  }`}
-                >
-                  <div className="font-semibold">{day}</div>
-                  <div className="text-xs text-gray-400 mt-1">
-                    {count} {count === 1 ? "subject" : "subjects"}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="section-title">Edit {selectedDay}</div>
-
-          <div className="soft-card p-4 space-y-3">
-            {Array.from({ length: PERIODS }).map((_, i) => (
-              <div key={i} className="grid grid-cols-[68px_1fr] items-center gap-3">
-                <label className="text-xs font-bold uppercase text-[#71767b]">
-                  P{i + 1}
-                </label>
-                <select
-                  value={currentDayPeriods[i] || ""}
-                  onChange={(e) => updateCell(i, e.target.value)}
-                  className="input-ui"
-                >
-                  <option value="">Select subject</option>
-                  {subjectNames.map((subject) => (
-                    <option key={subject} value={subject}>
-                      {subject}
-                    </option>
-                  ))}
-                </select>
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="glass-card p-3">
+                  <p className="metric-title">Subjects</p>
+                  <p className="metric-value">{subjects.length}</p>
+                </div>
+                <div className="glass-card p-3">
+                  <p className="metric-title">Periods</p>
+                  <p className="metric-value">{totalScheduledPeriods}</p>
+                </div>
+                <div className="glass-card p-3">
+                  <p className="metric-title">{selectedDay.slice(0, 3)}</p>
+                  <p className="metric-value">{selectedDayFilledPeriods}</p>
+                </div>
               </div>
-            ))}
 
-            <button onClick={handleSaveDay} className="primary-btn">
-              Save {selectedDay}
-            </button>
-          </div>
+              <div className="section-title">Timetable</div>
+
+              <div className="grid grid-cols-2 gap-3">
+                {DAYS.map((day) => {
+                  const active = selectedDay === day;
+                  const count = daySubjectCounts[day] || 0;
+
+                  return (
+                    <button
+                      key={day}
+                      type="button"
+                      onClick={() => {
+                        setSelectedDay(day);
+                        setMessage("");
+                      }}
+                      className={`rounded-lg border px-4 py-4 text-left transition ${
+                        active
+                          ? "border-[#1d9bf0]/45 bg-[#1d9bf0]/12 text-white"
+                          : "border-[#2f3336] bg-[#16181c] text-gray-300 hover:bg-[#202327]"
+                      }`}
+                    >
+                      <div className="font-semibold">{day}</div>
+                      <div className="text-xs text-gray-400 mt-1">
+                        {count} {count === 1 ? "subject" : "subjects"}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="section-title">Edit {selectedDay}</div>
+
+              <div className="soft-card p-4 space-y-3">
+                {Array.from({ length: PERIODS }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="grid grid-cols-[68px_1fr] items-center gap-3"
+                  >
+                    <label className="text-xs font-bold uppercase text-[#71767b]">
+                      P{i + 1}
+                    </label>
+                    <select
+                      value={currentDayPeriods[i] || ""}
+                      onChange={(e) => updateCell(i, e.target.value)}
+                      className="input-ui"
+                    >
+                      <option value="">Select subject</option>
+                      {subjectNames.map((subject) => (
+                        <option key={subject} value={subject}>
+                          {subject}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+
+                <button onClick={handleSaveDay} className="primary-btn">
+                  Save {selectedDay}
+                </button>
+              </div>
+            </>
+          )}
         </>
       )}
 
