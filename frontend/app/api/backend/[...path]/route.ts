@@ -224,9 +224,34 @@ function isSubscriptionRequest(path: string[]) {
   return path[0] === "users" && path[2] === "subscription";
 }
 
+// Next decodes each segment before we see it, so `%2F` arrives as a literal
+// "/" *inside* a segment and `..%2F` as a dot segment. backendUrl() joins the
+// segments verbatim (it must not re-encode — see the note there), and fetch()
+// then resolves the dot segments: "users/1/../2/home-data" becomes
+// "/users/2/home-data". That walks straight past the ownership check below,
+// which only inspects path[1], and "users/1/..%2F..%2Fauth%2Fgoogle-user"
+// escapes /users entirely onto a service-secret route. Since re-encoding is
+// ruled out, refuse traversal instead.
+function hasUnsafeSegment(path: string[]) {
+  return path.some(
+    (segment) =>
+      segment === "" ||
+      segment === "." ||
+      segment === ".." ||
+      segment.includes("/") ||
+      segment.includes("\\"),
+  );
+}
+
 async function proxyToBackend(request: NextRequest, context: RouteContext) {
   const params = await context.params;
   const path = params.path || [];
+
+  // Must run before the ownership check: a traversal segment makes path[1]
+  // look like the session's own id while the forwarded URL points elsewhere.
+  if (hasUnsafeSegment(path)) {
+    return Response.json({ error: "Not found" }, { status: 404 });
+  }
 
   if (path[0] !== "users") {
     return Response.json({ error: "Not found" }, { status: 404 });
