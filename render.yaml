@@ -33,6 +33,15 @@ services:
         value: "1"
       - key: DB_POOL_MAX
         value: "10"
+      # Supabase's pooler hangs up on idle connections and libpq only finds
+      # out on the next round trip, so a reused connection is verified with a
+      # SELECT 1 (PING_AFTER=0) and one idle longer than MAX_IDLE is replaced
+      # outright. Without these, every hang-up became a failed request and an
+      # ERROR line in the Postgres log.
+      - key: DB_POOL_PING_AFTER
+        value: "0"
+      - key: DB_POOL_MAX_IDLE
+        value: "240"
       # Rate limiting (per user id in path). Tune without a code change.
       - key: RATE_LIMIT_ENABLED
         value: "true"
