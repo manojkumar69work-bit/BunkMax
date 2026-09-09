@@ -39,6 +39,18 @@ MAX_CONN = max(MIN_CONN, _get_int_env("DB_POOL_MAX", 5))
 # hangs up on for being idle.
 IDLE_RECYCLE_SECONDS = max(0, _get_int_env("DB_POOL_MAX_IDLE", 240))
 
+# Verify with a `SELECT 1` before handing out a connection that has been idle
+# at least this long. 0 means every connection taken from the idle pool is
+# checked; a freshly dialled one never is.
+#
+# Recycling on age alone is not enough: when the server hangs up, libpq does
+# not notice until the next round trip, so `closed` still reads 0 and the
+# endpoint's real query is what dies -- which is precisely the error we are
+# trying to keep out of the Postgres log. Any trust window, however short, is
+# a hole a connection can die inside, so the default buys correctness with one
+# round trip per checkout. Raise it if that ever shows up in latency.
+PING_AFTER_SECONDS = max(0, _get_int_env("DB_POOL_PING_AFTER", 0))
+
 
 class _TrackedConnection(extensions.connection):
     """
@@ -72,6 +84,27 @@ def _idle_too_long(raw_conn) -> bool:
 
     idle = _idle_for(raw_conn)
     return idle is not None and idle > IDLE_RECYCLE_SECONDS
+
+
+def _needs_ping(raw_conn) -> bool:
+    # No timestamp means the pool just dialled it -- nothing to verify.
+    idle = _idle_for(raw_conn)
+    return idle is not None and idle >= PING_AFTER_SECONDS
+
+
+def _ping(raw_conn) -> bool:
+    """True if the connection still has a live server on the other end."""
+    try:
+        with raw_conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+
+        # Hand it over idle rather than mid-transaction.
+        raw_conn.rollback()
+        return True
+
+    except Exception:
+        return False
 
 
 def _discard(raw_conn) -> None:
@@ -156,10 +189,12 @@ try:
     )
 
     logger.info(
-        "Database connection pool created: min=%s max=%s idle_recycle=%ss",
+        "Database connection pool created: min=%s max=%s "
+        "idle_recycle=%ss ping_after=%ss",
         MIN_CONN,
         MAX_CONN,
         IDLE_RECYCLE_SECONDS,
+        PING_AFTER_SECONDS,
     )
 
 except Exception as exc:
@@ -183,6 +218,11 @@ def get_conn() -> PooledConnection:
             raw_conn = connection_pool.getconn()
 
             if raw_conn.closed or _idle_too_long(raw_conn):
+                _discard(raw_conn)
+                continue
+
+            if _needs_ping(raw_conn) and not _ping(raw_conn):
+                logger.info("Replaced a pooled connection the server had closed")
                 _discard(raw_conn)
                 continue
 
