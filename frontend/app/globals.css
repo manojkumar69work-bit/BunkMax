@@ -190,3 +190,31 @@ button:active {
   color: white;
   background: var(--surface-strong);
 }
+
+/* Aligned figures, so percentages read as a column instead of jittering as
+   digit widths change. Used by the Buddy comparison tables. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* The one animation on Buddy: the shared week assembles once on open. */
+.bar-rise {
+  transform-origin: bottom;
+  animation: bar-rise 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes bar-rise {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar-rise {
+    animation: none;
+  }
+}
