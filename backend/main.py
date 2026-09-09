@@ -3341,6 +3341,70 @@ def buddy_pair(user_id: int, buddy_id: int) -> tuple[int, int]:
     return (min(user_id, buddy_id), max(user_id, buddy_id))
 
 
+_buddy_tables_lock = threading.Lock()
+_buddy_tables_ready = False
+
+
+def _ensure_buddy_tables(conn) -> None:
+    """
+    Create the buddy tables on first use, the way `erp_credentials` does.
+
+    They are also in /init-db, but that route sits behind
+    ENABLE_ADMIN_DB_ROUTES and 404s unless someone flips the flag by hand, so
+    a deploy that ships a new table leaves these endpoints querying a relation
+    that does not exist -- every call erroring, and every error landing in the
+    Postgres log. Committing immediately (rather than riding the caller's
+    transaction) means a later rollback in the endpoint cannot undo the DDL
+    while leaving the latch set. Latched after the first success, so this
+    costs one bool check per request instead of four DDL statements.
+    """
+    global _buddy_tables_ready
+
+    if _buddy_tables_ready:
+        return
+
+    with _buddy_tables_lock:
+        if _buddy_tables_ready:
+            return
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS buddies (
+                    id SERIAL PRIMARY KEY,
+                    user_a INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    user_b INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT buddies_distinct CHECK (user_a <> user_b),
+                    CONSTRAINT buddies_ordered CHECK (user_a < user_b),
+                    UNIQUE (user_a, user_b)
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS buddy_invites (
+                    code TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    redeemed_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    redeemed_at TIMESTAMPTZ
+                );
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_buddies_user_b
+                ON buddies(user_b);
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_buddy_invites_user_id
+                ON buddy_invites(user_id);
+            """)
+
+        conn.commit()
+        _buddy_tables_ready = True
+
+
 def fetch_buddy(conn, user_id: int, buddy_id: int) -> Optional[dict[str, Any]]:
     """
     Return the buddy's public identity, but only if the pair is actually
@@ -3497,6 +3561,8 @@ def create_buddy_invite(user_id: int, _: None = Depends(require_service_secret))
     """
     conn = get_conn()
     try:
+        _ensure_buddy_tables(conn)
+
         with conn.cursor() as cur:
             if count_buddies(cur, user_id) >= BUDDY_MAX_PER_USER:
                 raise HTTPException(
@@ -3561,6 +3627,8 @@ def create_buddy_invite(user_id: int, _: None = Depends(require_service_secret))
 def list_buddies(user_id: int, _: None = Depends(require_service_secret)):
     conn = get_conn()
     try:
+        _ensure_buddy_tables(conn)
+
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
@@ -3626,6 +3694,8 @@ def redeem_buddy_invite(
 
     conn = get_conn()
     try:
+        _ensure_buddy_tables(conn)
+
         with conn.cursor() as cur:
             # Lock the invite row so two people racing the same code can't
             # both redeem it.
@@ -3730,6 +3800,8 @@ def remove_buddy(
 
     conn = get_conn()
     try:
+        _ensure_buddy_tables(conn)
+
         with conn.cursor() as cur:
             cur.execute("""
                 DELETE FROM buddies
@@ -3764,6 +3836,8 @@ def buddy_best_day(
     """The best day for both students to bunk together."""
     conn = get_conn()
     try:
+        _ensure_buddy_tables(conn)
+
         buddy = fetch_buddy(conn, user_id, buddy_id)
 
         if not buddy:
