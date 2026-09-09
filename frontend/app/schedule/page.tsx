@@ -274,37 +274,39 @@ function ScheduleView() {
 
               <div className="section-title">Timetable</div>
 
-              <div className="grid grid-cols-2 gap-3">
-                {DAYS.map((day) => {
-                  const active = selectedDay === day;
-                  const count = daySubjectCounts[day] || 0;
-
-                  return (
-                    <button
-                      key={day}
-                      type="button"
-                      onClick={() => {
-                        setSelectedDay(day);
-                        setMessage("");
-                      }}
-                      className={`rounded-lg border px-4 py-4 text-left transition ${
-                        active
-                          ? "border-[#1d9bf0]/45 bg-[#1d9bf0]/12 text-white"
-                          : "border-[#2f3336] bg-[#16181c] text-gray-300 hover:bg-[#202327]"
-                      }`}
-                    >
-                      <div className="font-semibold">{day}</div>
-                      <div className="text-xs text-gray-400 mt-1">
-                        {count} {count === 1 ? "subject" : "subjects"}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="section-title">Edit {selectedDay}</div>
-
+              {/* The day picker sits on the same label column as the periods
+                  below it, so choosing a day and filling it read as one job. */}
               <div className="soft-card p-4 space-y-3">
+                <div className="grid grid-cols-[68px_1fr] items-center gap-3">
+                  <label
+                    htmlFor="day-select"
+                    className="text-xs font-bold uppercase text-[#71767b]"
+                  >
+                    Day
+                  </label>
+                  <select
+                    id="day-select"
+                    value={selectedDay}
+                    onChange={(e) => {
+                      setSelectedDay(e.target.value);
+                      setMessage("");
+                    }}
+                    className="input-ui font-semibold"
+                  >
+                    {DAYS.map((day) => {
+                      const count = daySubjectCounts[day] || 0;
+
+                      return (
+                        <option key={day} value={day}>
+                          {day} · {count} {count === 1 ? "subject" : "subjects"}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                <div className="border-t border-[#2f3336]" />
+
                 {Array.from({ length: PERIODS }).map((_, i) => (
                   <div
                     key={i}
