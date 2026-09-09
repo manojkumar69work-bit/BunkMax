@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from contextlib import suppress
 
 import psycopg2
@@ -28,6 +29,55 @@ def _get_int_env(name: str, default: int) -> int:
 
 MIN_CONN = max(1, _get_int_env("DB_POOL_MIN", 1))
 MAX_CONN = max(MIN_CONN, _get_int_env("DB_POOL_MAX", 5))
+
+# Replace a pooled connection that has been sitting idle longer than this
+# instead of handing it out.
+#
+# psycopg2 keeps at most MIN_CONN connections idle and closes the rest on
+# return, so on a quiet app there is effectively ONE long-lived connection that
+# nearly every request reuses -- and it is exactly the one Supabase's pooler
+# hangs up on for being idle.
+IDLE_RECYCLE_SECONDS = max(0, _get_int_env("DB_POOL_MAX_IDLE", 240))
+
+
+class _TrackedConnection(extensions.connection):
+    """
+    A pooled connection that remembers when it was last returned to the pool.
+
+    Keeping the timestamp on the connection itself, rather than in a side map
+    keyed by id(), means it goes away with the connection: nothing to prune
+    when psycopg2 closes a connection instead of pooling it, and no chance of
+    a reused id() pointing at a stale entry.
+    """
+
+    idle_since = None
+
+
+def _mark_returned(raw_conn) -> None:
+    raw_conn.idle_since = time.monotonic()
+
+
+def _mark_in_use(raw_conn) -> None:
+    raw_conn.idle_since = None
+
+
+def _idle_for(raw_conn):
+    since = getattr(raw_conn, "idle_since", None)
+    return None if since is None else time.monotonic() - since
+
+
+def _idle_too_long(raw_conn) -> bool:
+    if not IDLE_RECYCLE_SECONDS:
+        return False
+
+    idle = _idle_for(raw_conn)
+    return idle is not None and idle > IDLE_RECYCLE_SECONDS
+
+
+def _discard(raw_conn) -> None:
+    """Close a connection and drop it from the pool so getconn() rebuilds it."""
+    with suppress(Exception):
+        connection_pool.putconn(raw_conn, close=True)
 
 
 class PooledConnection:
@@ -66,8 +116,7 @@ class PooledConnection:
         self._returned = True
 
         if self._raw_conn.closed:
-            with suppress(Exception):
-                self._pool.putconn(self._raw_conn, close=True)
+            _discard(self._raw_conn)
             return
 
         try:
@@ -76,13 +125,12 @@ class PooledConnection:
             if status != extensions.TRANSACTION_STATUS_IDLE:
                 self._raw_conn.rollback()
 
+            _mark_returned(self._raw_conn)
             self._pool.putconn(self._raw_conn)
 
         except Exception:
             logger.exception("Failed to safely return DB connection to pool")
-
-            with suppress(Exception):
-                self._pool.putconn(self._raw_conn, close=True)
+            _discard(self._raw_conn)
 
     def __enter__(self):
         return self
@@ -103,13 +151,15 @@ try:
         MIN_CONN,
         MAX_CONN,
         dsn=DATABASE_URL,
+        connection_factory=_TrackedConnection,
         cursor_factory=RealDictCursor,
     )
 
     logger.info(
-        "Database connection pool created: min=%s max=%s",
+        "Database connection pool created: min=%s max=%s idle_recycle=%ss",
         MIN_CONN,
         MAX_CONN,
+        IDLE_RECYCLE_SECONDS,
     )
 
 except Exception as exc:
@@ -126,15 +176,20 @@ def get_conn() -> PooledConnection:
     """
 
     try:
-        raw_conn = connection_pool.getconn()
-
-        if raw_conn.closed:
-            with suppress(Exception):
-                connection_pool.putconn(raw_conn, close=True)
-
+        # Each discard frees its pool slot, so the next getconn() dials a fresh
+        # connection. Bounded so a DB that refuses every connection fails fast
+        # instead of spinning.
+        for _attempt in range(MAX_CONN + 1):
             raw_conn = connection_pool.getconn()
 
-        return PooledConnection(raw_conn, connection_pool)
+            if raw_conn.closed or _idle_too_long(raw_conn):
+                _discard(raw_conn)
+                continue
+
+            _mark_in_use(raw_conn)
+            return PooledConnection(raw_conn, connection_pool)
+
+        raise RuntimeError("No usable connection after recycling the pool")
 
     except Exception as exc:
         logger.exception("Failed to get connection from pool")
