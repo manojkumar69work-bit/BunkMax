@@ -143,9 +143,9 @@ export default function Home() {
       }
     }
 
-    if (!getCachedSchedule(userId)) {
-      loadSchedule();
-    }
+    // Always revalidate. The seed above may be arbitrarily old now, and
+    // getSchedule() is TTL-cached, so a call inside the window costs nothing.
+    loadSchedule();
   }, [appUser?.id]);
 
   useEffect(() => {
