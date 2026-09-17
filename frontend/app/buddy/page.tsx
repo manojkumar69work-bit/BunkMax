@@ -8,6 +8,8 @@ import {
   createBuddyInvite,
   getBuddies,
   getBuddyBestDay,
+  getCachedBuddies,
+  getCachedBuddyPlan,
   redeemBuddyCode,
   removeBuddy,
   type Buddy,
@@ -74,9 +76,17 @@ function pct(value: number): string {
 export default function BuddyPage() {
   const { appUser, loadingUser } = useAppUser();
 
-  const [buddies, setBuddies] = useState<Buddy[]>([]);
-  const [invite, setInvite] = useState<BuddyInvite | null>(null);
-  const [loading, setLoading] = useState(true);
+  const userId = appUser?.id;
+
+  // Seed synchronously from the shared read cache so coming back to the tab
+  // paints the buddies that were already on screen instead of a skeleton.
+  const [buddies, setBuddies] = useState<Buddy[]>(
+    () => (userId ? getCachedBuddies(userId)?.buddies ?? [] : [])
+  );
+  const [invite, setInvite] = useState<BuddyInvite | null>(
+    () => (userId ? getCachedBuddies(userId)?.invite ?? null : null)
+  );
+  const [loading, setLoading] = useState(() => !(userId && getCachedBuddies(userId)));
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -85,12 +95,13 @@ export default function BuddyPage() {
   const [minting, setMinting] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(() => {
+    const cached = userId ? getCachedBuddies(userId) : null;
+    return cached?.buddies.length === 1 ? cached.buddies[0].id : null;
+  });
   const [plan, setPlan] = useState<BuddyPlanResponse | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [planError, setPlanError] = useState("");
-
-  const userId = appUser?.id;
 
   const load = useCallback(async (id: number) => {
     try {
@@ -124,7 +135,10 @@ export default function BuddyPage() {
     }
 
     let active = true;
-    setPlanLoading(true);
+    const cached = getCachedBuddyPlan(userId, selectedId);
+
+    setPlan(cached);
+    setPlanLoading(!cached);
     setPlanError("");
 
     getBuddyBestDay(userId, selectedId)
