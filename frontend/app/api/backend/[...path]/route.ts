@@ -1,6 +1,6 @@
 import { auth } from "@/auth";
 import { NextRequest } from "next/server";
-import { unstable_cache } from "next/cache";
+import { revalidateTag, unstable_cache } from "next/cache";
 
 export const dynamic = "force-dynamic";
 
@@ -203,6 +203,18 @@ function isSubscriptionRequest(path: string[]) {
   return path[0] === "users" && path[2] === "subscription";
 }
 
+// Writes that change the users row itself — a profile edit (PUT /users/{id})
+// or anything under /subscription. Both this route and /api/me serve that row
+// from a 240s Data Cache entry, so the entry has to be dropped on the way
+// through or the edit appears to be ignored until the window expires.
+// Deliberately NOT every write: mark-attendance is frequent and touches no
+// user field, so busting the entry for it would just re-add the DB hit the
+// cache exists to remove.
+function mutatesUserRecord(method: string, path: string[]) {
+  if (method === "GET" || method === "HEAD") return false;
+  return path.length === 2 || isSubscriptionRequest(path);
+}
+
 // Next decodes each segment before we see it, so `%2F` arrives as a literal
 // "/" *inside* a segment and `..%2F` as a dot segment. backendUrl() joins the
 // segments verbatim (it must not re-encode — see the note there), and fetch()
@@ -298,6 +310,14 @@ async function proxyToBackend(request: NextRequest, context: RouteContext) {
     );
   } finally {
     clearTimeout(timeout);
+  }
+
+  if (backendRes.ok && mutatesUserRecord(request.method, path)) {
+    // `{ expire: 0 }`, not "max": "max" is stale-while-revalidate, which would
+    // serve the pre-edit record once more and make a profile save look like it
+    // was ignored. updateTag() is the documented read-your-own-writes API but
+    // is Server-Action-only, so this is the route-handler equivalent.
+    revalidateTag("user-sync", { expire: 0 });
   }
 
   const responseHeaders = new Headers();
