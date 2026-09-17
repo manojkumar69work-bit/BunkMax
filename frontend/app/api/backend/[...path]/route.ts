@@ -19,40 +19,19 @@ const SERVICE_SECRET = process.env.BACKEND_API_SECRET || "";
 // value here was 5s, which meant every request failed during a cold start.
 const BACKEND_TIMEOUT_MS = Number(process.env.BACKEND_TIMEOUT_MS) || 30000;
 
-// Read-only endpoints that we can let the Vercel CDN serve from cache. URLs
-// already vary by user id in the path, so cross-user leakage isn't possible.
-// Writes (mark-attendance / save / import / verify / delete / friends) are
-// always passed through.
-type CacheableSpec = {
-  pattern: RegExp;
-  sMaxAge: number; // seconds: how long the CDN serves from cache
-  swr: number; // seconds: stale-while-revalidate window
-};
-
-const CACHEABLE_GETS: CacheableSpec[] = [
-  { pattern: /^\/users\/\d+\/home-data$/, sMaxAge: 15, swr: 120 },
-  { pattern: /^\/users\/\d+\/dashboard$/, sMaxAge: 15, swr: 120 },
-  { pattern: /^\/users\/\d+\/subjects$/, sMaxAge: 20, swr: 180 },
-  { pattern: /^\/users\/\d+\/schedule$/, sMaxAge: 30, swr: 240 },
-  { pattern: /^\/users\/\d+\/tomorrow$/, sMaxAge: 15, swr: 120 },
-  { pattern: /^\/users\/\d+\/best-day$/, sMaxAge: 15, swr: 120 },
-  { pattern: /^\/users\/\d+\/worst-day$/, sMaxAge: 15, swr: 120 },
-  // Two students' attendance moves at most once a day, so a longer window is
-  // safe here — and this is the one read that touches two users' rows.
-  { pattern: /^\/users\/\d+\/buddies\/\d+\/best-day$/, sMaxAge: 60, swr: 300 },
-  { pattern: /^\/users\/\d+$/, sMaxAge: 60, swr: 300 },
-  { pattern: /^\/users\/\d+\/subscription$/, sMaxAge: 60, swr: 300 },
-];
-
-function cacheDirectiveFor(path: string[]) {
-  const fullPath = "/" + path.join("/");
-  for (const spec of CACHEABLE_GETS) {
-    if (spec.pattern.test(fullPath)) {
-      return `private, s-maxage=${spec.sMaxAge}, stale-while-revalidate=${spec.swr}`;
-    }
-  }
-  return null;
-}
+// No HTTP caching on this route, deliberately.
+//
+// A CDN hit is served without running this handler, which means without the
+// ownership check below — so a shared cache would let anyone fetch
+// /api/backend/users/5/home-data and receive user 5's data. `private` is what
+// prevents that, and it also rules out the `s-maxage` this route used to send,
+// which a shared cache is the only thing that honours. The header was inert.
+//
+// Browser-only caching doesn't work here either: `stale-while-revalidate`
+// resolves fetch() with the STALE body and refreshes the cache for next time,
+// so marking attendance would re-render the pre-mark numbers and keep them.
+// Read caching lives in lib/api.ts instead, where a write invalidates the
+// exact keys it affects.
 
 type AppUser = {
   id: number;
@@ -328,19 +307,9 @@ async function proxyToBackend(request: NextRequest, context: RouteContext) {
     responseHeaders.set("content-type", responseContentType);
   }
 
-  // Let the Vercel CDN cache safe read endpoints. Writes never reach here with
-  // a Cache-Control because the matcher excludes them. We only set the header
-  // on GETs to avoid leaking it onto responses with non-cacheable status codes
-  // (e.g. errors from the backend).
-  if (
-    request.method === "GET" &&
-    backendRes.ok
-  ) {
-    const directive = cacheDirectiveFor(path);
-    if (directive) {
-      responseHeaders.set("Cache-Control", directive);
-    }
-  }
+  // Every response here is user-scoped and must not be stored by anything in
+  // front of us. See the note at the top of this file.
+  responseHeaders.set("Cache-Control", "private, no-store");
 
   return new Response(backendRes.body, {
     status: backendRes.status,
