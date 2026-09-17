@@ -304,10 +304,39 @@ function readCache<T>(key: string, ttlMs: number): T | null {
 }
 
 function writeCache<T>(key: string, value: T) {
+  const entry = JSON.stringify({ t: Date.now(), v: value });
+
   try {
-    sessionStorage.setItem(key, JSON.stringify({ t: Date.now(), v: value }));
+    sessionStorage.setItem(key, entry);
   } catch {
     /* quota exceeded / unavailable */
+  }
+
+  // Mirror into localStorage so a peek can still paint something after the tab
+  // was closed or the PWA was killed, when sessionStorage is already gone.
+  try {
+    localStorage.setItem(mirrorKey(key), entry);
+  } catch {
+    /* quota exceeded / unavailable */
+  }
+}
+
+function mirrorKey(key: string) {
+  return `swr:${key}`;
+}
+
+// Last known value for `key`, however old. Backs the stale half of
+// stale-while-revalidate: paint this immediately, then let the network refresh
+// replace it, so a revisit never sits on a skeleton.
+function readStale<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(mirrorKey(key));
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as { t: number; v: T };
+    return parsed ? parsed.v : null;
+  } catch {
+    return null;
   }
 }
 
@@ -315,6 +344,7 @@ export function invalidateCache(...keys: string[]) {
   for (const key of keys) {
     try {
       sessionStorage.removeItem(key);
+      localStorage.removeItem(mirrorKey(key));
     } catch {
       /* ignore */
     }
@@ -341,16 +371,37 @@ const READ_TTL = 60 * 1000;
 // Synchronous cache peek. Lets a page seed its initial state from a prior
 // fetch so cached content paints immediately instead of flashing a loader.
 // Returns null when the entry is missing or older than READ_TTL.
+// These peeks are stale-while-revalidate: they return the last known value at
+// any age, so a page seeds from them and paints at once. They are for SEEDING
+// ONLY — never gate a fetch on one, or the stale value suppresses the refresh
+// that would replace it. Guard freshness with the TTL inside cachedFetch.
 export function getCachedHomeData(userId: number): HomeDataResponse | null {
-  return readCache<HomeDataResponse>(`home-data-${userId}`, READ_TTL);
+  const key = `home-data-${userId}`;
+  return readCache<HomeDataResponse>(key, READ_TTL) ?? readStale<HomeDataResponse>(key);
 }
 
 export function getCachedSubjects(userId: number): SubjectResponse[] | null {
-  return readCache<SubjectResponse[]>(`subjects-${userId}`, READ_TTL);
+  const key = `subjects-${userId}`;
+  return readCache<SubjectResponse[]>(key, READ_TTL) ?? readStale<SubjectResponse[]>(key);
 }
 
 export function getCachedSchedule(userId: number): ScheduleEntry[] | null {
-  return readCache<ScheduleEntry[]>(`schedule-${userId}`, READ_TTL);
+  const key = `schedule-${userId}`;
+  return readCache<ScheduleEntry[]>(key, READ_TTL) ?? readStale<ScheduleEntry[]>(key);
+}
+
+// Drop every cached read. Call on logout so the next account on this device
+// can't be shown the previous one's buddies.
+export function clearReadCache() {
+  try {
+    sessionStorage.clear();
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith("swr:")) localStorage.removeItem(key);
+    }
+  } catch {
+    /* ignore */
+  }
+  pendingRequests.clear();
 }
 
 /* ---------------- USER ---------------- */
