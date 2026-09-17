@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { signOut } from "next-auth/react";
 import BottomNav from "@/components/BottomNav";
-import { clearAllUserData, updateUser } from "@/lib/api";
+import { clearAllUserData, clearReadCache, updateUser } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
 import PushNotificationSettings from "@/components/PushNotificationSettings";
 import { mutateUser, useAppUser } from "@/lib/user";
@@ -235,7 +235,12 @@ export default function ProfilePage() {
 
             <button
               type="button"
-              onClick={() => signOut({ callbackUrl: "/login" })}
+              onClick={() => {
+                // Cached reads outlive the session cookie, so drop them here
+                // or the next account on this device inherits them.
+                clearReadCache();
+                signOut({ callbackUrl: "/login" });
+              }}
               className="secondary-btn flex items-center justify-center gap-2"
             >
               <LogOut className="w-4 h-4" />
