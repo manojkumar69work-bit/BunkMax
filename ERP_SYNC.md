@@ -195,7 +195,10 @@ the backend service secret, so the ERP endpoints needed **no proxy changes**.
     Never returns the password.
   - `DELETE /users/{id}/erp-credentials` — forget the saved login.
   - `GET|POST /cron/erp/sync-all` — daily best-effort re-sync of every user
-    with saved creds (behind the notification-cron secret).
+    with saved creds (behind the notification-cron secret). Returns
+    `{started, total}` at once and syncs in the background,
+    `ERP_CRON_WORKERS` (default 3) users at a time; per-user results land in
+    `erp_credentials.last_sync_status`.
 - `erp_credentials` table added to `init_db` **and** `migrate_db`; also created
   lazily (`CREATE TABLE IF NOT EXISTS`) inside the ERP endpoints so it
   self-heals without a manual migration.

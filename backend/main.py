@@ -12,6 +12,7 @@ import secrets
 import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 
 from database import get_conn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -2772,49 +2773,87 @@ def delete_erp_credentials(user_id: int, _: None = Depends(require_service_secre
     return {"message": "Saved portal login removed."}
 
 
+# Portal logins the nightly cron runs at once. Kept well under DB_POOL_MAX so
+# a cron run never starves live requests of connections.
+ERP_CRON_WORKERS = max(1, int(os.getenv("ERP_CRON_WORKERS", "3") or 3))
+
+# Held for the whole background run, so a scheduler retry can't start a
+# second pass over the same users while the first is still going.
+_erp_cron_lock = threading.Lock()
+
+
+def _cron_sync_saved_login(row) -> bool:
+    uid = row["user_id"]
+    try:
+        password = crypto_util.decrypt(row["erp_password_enc"])
+        _run_erp_sync(
+            uid,
+            row["erp_username"],
+            password,
+            row.get("institute_slug") or campushub.DEFAULT_SLUG,
+            save_credentials=True,
+        )
+        return True
+    except campushub.ERPError as exc:
+        _mark_erp_sync_status(uid, f"error: {exc.message}"[:200])
+    except Exception:
+        logger.exception("Cron ERP sync failed for user %s", uid)
+        _mark_erp_sync_status(uid, "error: sync failed")
+    return False
+
+
+def _run_erp_cron(rows) -> None:
+    try:
+        with ThreadPoolExecutor(max_workers=ERP_CRON_WORKERS) as pool:
+            results = list(pool.map(_cron_sync_saved_login, rows))
+        synced = sum(results)
+        logger.info(
+            "Cron ERP sync finished: synced=%s failed=%s total=%s",
+            synced, len(rows) - synced, len(rows),
+        )
+    except Exception:
+        logger.exception("Cron ERP sync run crashed")
+    finally:
+        _erp_cron_lock.release()
+
+
 @app.get("/cron/erp/sync-all")
 @app.post("/cron/erp/sync-all")
 def cron_erp_sync_all(_: None = Depends(require_notification_cron_secret)):
-    """Daily best-effort re-sync of every student with saved credentials."""
+    """
+    Daily best-effort re-sync of every student with saved credentials.
+
+    Each sync is several portal round trips, so running them all inside the
+    request would outlast any scheduler's HTTP timeout. The work runs on a
+    background thread instead and this returns as soon as it has started;
+    per-user results land in erp_credentials.last_sync_status and the log.
+    """
     if not crypto_util.is_configured():
         raise HTTPException(status_code=500, detail="Credential storage not configured.")
 
-    conn = get_conn()
+    if not _erp_cron_lock.acquire(blocking=False):
+        return {"started": False, "message": "A sync-all run is already in progress."}
+
     try:
-        with conn.cursor() as cur:
-            _ensure_erp_credentials_table(cur)
-            cur.execute(
-                "SELECT user_id, erp_username, erp_password_enc, institute_slug "
-                "FROM erp_credentials"
-            )
-            rows = cur.fetchall()
-            conn.commit()
-    finally:
-        conn.close()
-
-    synced = 0
-    failed = 0
-    for row in rows:
-        uid = row["user_id"]
+        conn = get_conn()
         try:
-            password = crypto_util.decrypt(row["erp_password_enc"])
-            _run_erp_sync(
-                uid,
-                row["erp_username"],
-                password,
-                row.get("institute_slug") or campushub.DEFAULT_SLUG,
-                save_credentials=True,
-            )
-            synced += 1
-        except campushub.ERPError as exc:
-            failed += 1
-            _mark_erp_sync_status(uid, f"error: {exc.message}"[:200])
-        except Exception:
-            failed += 1
-            logger.exception("Cron ERP sync failed for user %s", uid)
-            _mark_erp_sync_status(uid, "error: sync failed")
+            with conn.cursor() as cur:
+                _ensure_erp_credentials_table(cur)
+                cur.execute(
+                    "SELECT user_id, erp_username, erp_password_enc, institute_slug "
+                    "FROM erp_credentials"
+                )
+                rows = cur.fetchall()
+                conn.commit()
+        finally:
+            conn.close()
 
-    return {"synced": synced, "failed": failed, "total": len(rows)}
+        threading.Thread(target=_run_erp_cron, args=(rows,), daemon=True).start()
+    except Exception:
+        _erp_cron_lock.release()
+        raise
+
+    return {"started": True, "total": len(rows)}
 
 
 @app.get("/users/{user_id}/subjects")
