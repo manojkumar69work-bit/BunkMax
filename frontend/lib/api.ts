@@ -340,7 +340,13 @@ function readStale<T>(key: string): T | null {
   }
 }
 
+// Bumped by every invalidation. A read that started before the bump may be
+// carrying pre-write data, so cachedFetch won't store a result whose epoch
+// moved while it was in flight.
+let cacheEpoch = 0;
+
 export function invalidateCache(...keys: string[]) {
+  cacheEpoch++;
   for (const key of keys) {
     try {
       sessionStorage.removeItem(key);
@@ -355,6 +361,7 @@ export function invalidateCache(...keys: string[]) {
 // Drops every cached entry whose key starts with `prefix`. For key families
 // that can't be listed up front — one buddy-plan entry per buddy, say.
 export function invalidateCachePrefix(prefix: string) {
+  cacheEpoch++;
   try {
     for (const key of Object.keys(sessionStorage)) {
       if (key.startsWith(prefix)) sessionStorage.removeItem(key);
@@ -379,9 +386,36 @@ async function cachedFetch<T>(
   const cached = readCache<T>(key, ttlMs);
   if (cached !== null) return cached;
 
+  const epoch = cacheEpoch;
   const value = await fetchDeduped(key, fetcher);
-  writeCache(key, value);
+  if (epoch === cacheEpoch) writeCache(key, value);
   return value;
+}
+
+// Runs a write between two invalidations. The first stops pages serving the
+// old value while the write is in flight; the second drops anything a read
+// cached during that window, which can only be the pre-write data.
+async function writeThrough<T>(
+  invalidate: () => void,
+  request: () => Promise<T>
+): Promise<T> {
+  invalidate();
+  try {
+    return await request();
+  } finally {
+    invalidate();
+  }
+}
+
+// Every read that attendance, subjects or the timetable feed into.
+function invalidateAttendanceReads(userId: number) {
+  invalidateCache(
+    `home-data-${userId}`,
+    `dashboard-${userId}`,
+    `subjects-${userId}`,
+    `schedule-${userId}`
+  );
+  invalidateCachePrefix(buddyPlanPrefix(userId));
 }
 
 // Cache TTL for attendance/schedule reads (ms).
@@ -425,6 +459,7 @@ export function getCachedBuddyPlan(
 // Drop every cached read. Call on logout so the next account on this device
 // can't be shown the previous one's buddies.
 export function clearReadCache() {
+  cacheEpoch++;
   try {
     sessionStorage.clear();
     for (const key of Object.keys(localStorage)) {
@@ -466,20 +501,18 @@ export async function updateUser(
 }
 
 export async function clearAllUserData(userId: number) {
-  invalidateCache(
-    `home-data-${userId}`,
-    `dashboard-${userId}`,
-    `subjects-${userId}`,
-    `schedule-${userId}`,
-    buddyListKey(userId)
-  );
-  invalidateCachePrefix(buddyPlanPrefix(userId));
+  const invalidate = () => {
+    invalidateAttendanceReads(userId);
+    invalidateCache(buddyListKey(userId));
+  };
 
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/clear-data`, {
-    method: "DELETE",
+  return writeThrough(invalidate, async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/clear-data`, {
+      method: "DELETE",
+    });
+
+    return handleResponse<{ message: string }>(res);
   });
-
-  return handleResponse<{ message: string }>(res);
 }
 
 export async function getSubscription(userId: number) {
@@ -549,16 +582,15 @@ export async function markAttendance(
   },
   userId: number
 ) {
-  invalidateCache(`home-data-${userId}`, `dashboard-${userId}`, `subjects-${userId}`);
-  invalidateCachePrefix(buddyPlanPrefix(userId));
+  return writeThrough(() => invalidateAttendanceReads(userId), async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/mark-attendance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
 
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/mark-attendance`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    return handleResponse<{ message: string }>(res);
   });
-
-  return handleResponse<{ message: string }>(res);
 }
 
 /* ---------------- IMPORT ---------------- */
@@ -570,19 +602,18 @@ export async function importAttendance(
   },
   userId: number
 ) {
-  invalidateCache(`home-data-${userId}`, `dashboard-${userId}`, `subjects-${userId}`);
-  invalidateCachePrefix(buddyPlanPrefix(userId));
+  return writeThrough(() => invalidateAttendanceReads(userId), async () => {
+    const res = await fetchWithRetry(
+      `${API_BASE}/users/${userId}/import-attendance`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }
+    );
 
-  const res = await fetchWithRetry(
-    `${API_BASE}/users/${userId}/import-attendance`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    }
-  );
-
-  return handleResponse<{ message: string; subjects_imported?: number }>(res);
+    return handleResponse<{ message: string; subjects_imported?: number }>(res);
+  });
 }
 
 /* ---------------- ERP PORTAL SYNC ---------------- */
@@ -621,36 +652,35 @@ export async function erpSync(
   },
   userId: number
 ) {
-  invalidateCache(`home-data-${userId}`, `dashboard-${userId}`, `subjects-${userId}`);
-  invalidateCachePrefix(buddyPlanPrefix(userId));
+  // The portal sync replaces the timetable too, so the schedule read goes.
+  return writeThrough(() => invalidateAttendanceReads(userId), async () => {
+    const res = await fetchWithRetry(
+      `${API_BASE}/users/${userId}/erp-sync`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      0,
+      60000
+    );
 
-  const res = await fetchWithRetry(
-    `${API_BASE}/users/${userId}/erp-sync`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
-    0,
-    60000
-  );
-
-  return handleResponse<ErpSyncResult>(res);
+    return handleResponse<ErpSyncResult>(res);
+  });
 }
 
 // Re-sync using credentials already stored on the server (no password sent).
 export async function erpResync(userId: number) {
-  invalidateCache(`home-data-${userId}`, `dashboard-${userId}`, `subjects-${userId}`);
-  invalidateCachePrefix(buddyPlanPrefix(userId));
+  return writeThrough(() => invalidateAttendanceReads(userId), async () => {
+    const res = await fetchWithRetry(
+      `${API_BASE}/users/${userId}/erp-resync`,
+      { method: "POST" },
+      0,
+      60000
+    );
 
-  const res = await fetchWithRetry(
-    `${API_BASE}/users/${userId}/erp-resync`,
-    { method: "POST" },
-    0,
-    60000
-  );
-
-  return handleResponse<ErpSyncResult>(res);
+    return handleResponse<ErpSyncResult>(res);
+  });
 }
 
 export async function getErpStatus(userId: number) {
@@ -689,32 +719,28 @@ export async function saveSubject(
   },
   userId: number
 ) {
-  // Clear cache after save
-  invalidateCache(`subjects-${userId}`, `home-data-${userId}`, `dashboard-${userId}`);
-  invalidateCachePrefix(buddyPlanPrefix(userId));
+  return writeThrough(() => invalidateAttendanceReads(userId), async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subjects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
 
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/subjects`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    return handleResponse<{ message: string }>(res);
   });
-
-  return handleResponse<{ message: string }>(res);
 }
 
 export async function deleteSubject(subjectId: number, userId: number) {
-  // Clear cache after delete
-  invalidateCache(`subjects-${userId}`, `home-data-${userId}`, `dashboard-${userId}`);
-  invalidateCachePrefix(buddyPlanPrefix(userId));
+  return writeThrough(() => invalidateAttendanceReads(userId), async () => {
+    const res = await fetchWithRetry(
+      `${API_BASE}/users/${userId}/subjects/${subjectId}`,
+      {
+        method: "DELETE",
+      }
+    );
 
-  const res = await fetchWithRetry(
-    `${API_BASE}/users/${userId}/subjects/${subjectId}`,
-    {
-      method: "DELETE",
-    }
-  );
-
-  return handleResponse<{ message: string }>(res);
+    return handleResponse<{ message: string }>(res);
+  });
 }
 
 /* ---------------- SCHEDULE / TIMETABLE ---------------- */
@@ -742,17 +768,15 @@ export async function getSchedule(userId: number) {
 }
 
 export async function saveSchedule(payload: ScheduleEntry[], userId: number) {
-  // Clear cache after save
-  invalidateCache(`schedule-${userId}`, `home-data-${userId}`);
-  invalidateCachePrefix(buddyPlanPrefix(userId));
+  return writeThrough(() => invalidateAttendanceReads(userId), async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/schedule`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
 
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/schedule`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    return handleResponse<{ message: string }>(res);
   });
-
-  return handleResponse<{ message: string }>(res);
 }
 
 /* ---------------- BACKWARD COMPATIBILITY ---------------- */
@@ -1101,33 +1125,36 @@ export async function getBuddies(userId: number) {
 
 export async function createBuddyInvite(userId: number) {
   // The list response carries the active invite, so a new code stales it.
-  invalidateCache(buddyListKey(userId));
-
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/buddy-invite`, {
-    method: "POST",
+  return writeThrough(() => invalidateCache(buddyListKey(userId)), async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/buddy-invite`, {
+      method: "POST",
+    });
+    return handleResponse<BuddyInvite & { expires_in_hours: number }>(res);
   });
-  return handleResponse<BuddyInvite & { expires_in_hours: number }>(res);
 }
 
 export async function redeemBuddyCode(userId: number, code: string) {
-  invalidateCache(buddyListKey(userId));
-
-  const res = await fetchWithRetry(`${API_BASE}/users/${userId}/buddies`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
+  return writeThrough(() => invalidateCache(buddyListKey(userId)), async () => {
+    const res = await fetchWithRetry(`${API_BASE}/users/${userId}/buddies`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    return handleResponse<{ message: string; buddy: Buddy }>(res);
   });
-  return handleResponse<{ message: string; buddy: Buddy }>(res);
 }
 
 export async function removeBuddy(userId: number, buddyId: number) {
-  invalidateCache(buddyListKey(userId), buddyPlanKey(userId, buddyId));
-
-  const res = await fetchWithRetry(
-    `${API_BASE}/users/${userId}/buddies/${buddyId}`,
-    { method: "DELETE" },
+  return writeThrough(
+    () => invalidateCache(buddyListKey(userId), buddyPlanKey(userId, buddyId)),
+    async () => {
+      const res = await fetchWithRetry(
+        `${API_BASE}/users/${userId}/buddies/${buddyId}`,
+        { method: "DELETE" },
+      );
+      return handleResponse<{ message: string }>(res);
+    },
   );
-  return handleResponse<{ message: string }>(res);
 }
 
 export async function getBuddyBestDay(userId: number, buddyId: number) {
