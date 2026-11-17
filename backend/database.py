@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from contextlib import suppress
 
@@ -50,6 +51,17 @@ IDLE_RECYCLE_SECONDS = max(0, _get_int_env("DB_POOL_MAX_IDLE", 240))
 # a hole a connection can die inside, so the default buys correctness with one
 # round trip per checkout. Raise it if that ever shows up in latency.
 PING_AFTER_SECONDS = max(0, _get_int_env("DB_POOL_PING_AFTER", 0))
+
+# How long a request waits for a free connection before giving up.
+#
+# psycopg2's getconn() never waits: once MAX_CONN are checked out it raises
+# PoolError straight away, so a burst of more concurrent requests than the
+# pool holds turned into instant 500s. This semaphore has one slot per pooled
+# connection, so callers queue for a slot instead, and getconn() is only ever
+# called when the pool has one to give.
+POOL_WAIT_SECONDS = max(0, _get_int_env("DB_POOL_WAIT", 10))
+
+_pool_slots = threading.BoundedSemaphore(MAX_CONN)
 
 
 class _TrackedConnection(extensions.connection):
@@ -148,6 +160,12 @@ class PooledConnection:
 
         self._returned = True
 
+        try:
+            self._return_to_pool()
+        finally:
+            _pool_slots.release()
+
+    def _return_to_pool(self):
         if self._raw_conn.closed:
             _discard(self._raw_conn)
             return
@@ -210,6 +228,14 @@ def get_conn() -> PooledConnection:
     The wrapper returns it to the pool.
     """
 
+    if not _pool_slots.acquire(timeout=POOL_WAIT_SECONDS):
+        logger.error(
+            "No database connection free after %ss (pool max=%s)",
+            POOL_WAIT_SECONDS,
+            MAX_CONN,
+        )
+        raise RuntimeError("Database connection failed")
+
     try:
         # Each discard frees its pool slot, so the next getconn() dials a fresh
         # connection. Bounded so a DB that refuses every connection fails fast
@@ -232,6 +258,8 @@ def get_conn() -> PooledConnection:
         raise RuntimeError("No usable connection after recycling the pool")
 
     except Exception as exc:
+        # The slot only travels with a connection that was handed out.
+        _pool_slots.release()
         logger.exception("Failed to get connection from pool")
         raise RuntimeError("Database connection failed") from exc
 
