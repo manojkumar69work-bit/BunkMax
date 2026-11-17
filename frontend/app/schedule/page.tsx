@@ -74,7 +74,9 @@ function ScheduleView() {
   useEffect(() => {
     if (!appUser?.id) return;
     load(appUser.id);
-  }, [appUser]);
+    // Keyed on the id, not the object: every /api/me refresh hands back a new
+    // appUser, and reloading on that would wipe unsaved timetable edits.
+  }, [appUser?.id]);
 
   async function load(userId: number) {
     try {
