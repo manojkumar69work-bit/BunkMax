@@ -2395,14 +2395,10 @@ def _upsert_erp_subjects(cur, user_id, subjects, attendance) -> int:
         if present > total:
             present = total
 
-        # Use the percentage from the payload to derive required_percentage,
-        # falling back to 75 when the importer didn't supply one.
-        try:
-            pct = float(stats.get("percentage") or 0)
-            required_percentage = int(pct) if pct > 0 else 75
-        except (TypeError, ValueError):
-            required_percentage = 75
-
+        # The payload's `percentage` is the student's *current* attendance,
+        # not their target, so it never touches required_percentage. A new
+        # subject starts at the student's default target; an existing one
+        # keeps whatever target it already has.
         cur.execute("""
             INSERT INTO subjects (
                 user_id,
@@ -2411,18 +2407,20 @@ def _upsert_erp_subjects(cur, user_id, subjects, attendance) -> int:
                 total_classes,
                 required_percentage
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (
+                %s, %s, %s, %s,
+                COALESCE((SELECT default_target FROM users WHERE id = %s), 75)
+            )
             ON CONFLICT (user_id, subject_name)
             DO UPDATE SET
                 attended_classes = EXCLUDED.attended_classes,
-                total_classes = EXCLUDED.total_classes,
-                required_percentage = EXCLUDED.required_percentage
+                total_classes = EXCLUDED.total_classes
         """, (
             user_id,
             subject_name,
             present,
             total,
-            required_percentage,
+            user_id,
         ))
 
         imported += 1
