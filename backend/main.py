@@ -2498,7 +2498,33 @@ def import_attendance(
 # to copy-paste. Credentials can optionally be stored (Fernet-encrypted) for
 # one-tap re-sync and the daily auto-sync cron.
 
+_erp_credentials_table_lock = threading.Lock()
+_erp_credentials_table_ready = False
+
+
 def _ensure_erp_credentials_table(cur) -> None:
+    """
+    Create `erp_credentials` on first use, latched like _ensure_buddy_tables.
+
+    The DDL is committed at once so a later rollback cannot undo it while the
+    latch stays set -- which means callers must run this before any other
+    write on the cursor's transaction, or that write gets committed early.
+    """
+    global _erp_credentials_table_ready
+
+    if _erp_credentials_table_ready:
+        return
+
+    with _erp_credentials_table_lock:
+        if _erp_credentials_table_ready:
+            return
+
+        _create_erp_credentials_table(cur)
+        cur.connection.commit()
+        _erp_credentials_table_ready = True
+
+
+def _create_erp_credentials_table(cur) -> None:
     cur.execute("""
         CREATE TABLE IF NOT EXISTS erp_credentials (
             user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -2514,8 +2540,11 @@ def _ensure_erp_credentials_table(cur) -> None:
 
 
 def _run_erp_sync(user_id: int, username: str, password: str, slug: str,
-                  *, save_credentials: bool) -> dict:
-    """Fetch from the portal, upsert subjects + timetable, optionally persist credentials."""
+                  *, save_credentials: bool, forget_credentials: bool = False) -> dict:
+    """
+    Fetch from the portal, upsert subjects + timetable, then either persist the
+    credentials, delete any saved ones (`forget_credentials`), or leave them.
+    """
     result = campushub.fetch_all(username, password, slug)
     subjects = result["subjects"]
     attendance = result["attendance"]
@@ -2524,11 +2553,13 @@ def _run_erp_sync(user_id: int, username: str, password: str, slug: str,
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # First: it may commit, which must not carry the upserts with it.
+            _ensure_erp_credentials_table(cur)
+
             imported = _upsert_erp_subjects(cur, user_id, subjects, attendance)
             periods_imported = _upsert_timetable(cur, user_id, timetable)
 
             if save_credentials:
-                _ensure_erp_credentials_table(cur)
                 cur.execute("""
                     INSERT INTO erp_credentials (
                         user_id, erp_username, erp_password_enc, institute_slug,
@@ -2549,10 +2580,16 @@ def _run_erp_sync(user_id: int, username: str, password: str, slug: str,
                     slug,
                     "ok",
                 ))
+            elif forget_credentials:
+                # Unticking "Keep me synced" means forget the login, or the
+                # nightly cron would keep signing in with it.
+                cur.execute(
+                    "DELETE FROM erp_credentials WHERE user_id = %s",
+                    (user_id,),
+                )
             else:
-                # If they previously saved but now opt out, still refresh the
-                # last_synced marker when a row exists.
-                _ensure_erp_credentials_table(cur)
+                # Saving was wanted but is unavailable (no ERP_CRED_KEY):
+                # refresh the last_synced marker on any row already saved.
                 cur.execute(
                     "UPDATE erp_credentials SET last_synced_at = NOW(), "
                     "last_sync_status = 'ok', updated_at = NOW() WHERE user_id = %s",
@@ -2605,6 +2642,7 @@ def erp_sync(
             payload.erp_password,
             payload.institute_slug or campushub.DEFAULT_SLUG,
             save_credentials=save_credentials,
+            forget_credentials=not payload.save_credentials,
         )
         if degraded:
             result["credentials_error"] = (
