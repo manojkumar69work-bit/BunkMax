@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { AppUser } from "@/lib/user";
+import { clearUserCache, type AppUser } from "@/lib/user";
 import {
+  clearReadCache,
   createSubscriptionOrder,
   getSubscription,
   type SubscriptionPlan,
@@ -307,7 +308,8 @@ export default function PaywallModal({
           <button 
             type="button"
             onClick={() => {
-              localStorage.removeItem("bunkmax_user");
+              clearReadCache();
+              clearUserCache();
               signOut({ callbackUrl: "/login" });
             }}
             className="rounded-full border border-white/10 bg-white/5 px-4 py-3 text-xs font-semibold text-gray-300 hover:bg-white/10 hover:text-white transition"

@@ -6,7 +6,7 @@ import BottomNav from "@/components/BottomNav";
 import { clearAllUserData, clearReadCache, updateUser } from "@/lib/api";
 import FullScreenLoader from "@/components/FullScreenLoader";
 import PushNotificationSettings from "@/components/PushNotificationSettings";
-import { mutateUser, useAppUser } from "@/lib/user";
+import { clearUserCache, mutateUser, useAppUser } from "@/lib/user";
 import { ChevronDown, ChevronRight, UserRound, Pencil, LogOut, Trash2 } from "lucide-react";
 
 type EditField = "name" | "college" | "branch" | "semester" | "section" | null;
@@ -239,6 +239,7 @@ export default function ProfilePage() {
                 // Cached reads outlive the session cookie, so drop them here
                 // or the next account on this device inherits them.
                 clearReadCache();
+                clearUserCache();
                 signOut({ callbackUrl: "/login" });
               }}
               className="secondary-btn flex items-center justify-center gap-2"
