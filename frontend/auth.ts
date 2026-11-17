@@ -1,4 +1,4 @@
-import NextAuth from "next-auth";
+import NextAuth, { type Profile } from "next-auth";
 import Google from "next-auth/providers/google";
 
 declare module "next-auth" {
@@ -23,6 +23,20 @@ const DEV_ALLOWED_EMAILS = new Set(
         .filter(Boolean)
     : []
 );
+
+// Google builds `name` as given_name + " " + family_name, and the college
+// provisioned part of the 2026 batch with the full name in *both* directory
+// fields, so those accounts arrive as "RAVI KUMAR RAVI KUMAR". When the two
+// fields match (ignoring case and spacing) the given name alone is the real
+// name; otherwise Google's own `name` is trusted as is.
+function resolveProfileName(profile: Profile): string {
+  const tidy = (value: unknown) =>
+    typeof value === "string" ? value.split(/\s+/).filter(Boolean).join(" ") : "";
+  const given = tidy(profile.given_name);
+  const family = tidy(profile.family_name);
+  if (given && given.toLowerCase() === family.toLowerCase()) return given;
+  return tidy(profile.name);
+}
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
@@ -68,8 +82,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
 
     async jwt({ token, profile }) {
+      const profileName = profile ? resolveProfileName(profile) : "";
       if (profile?.email) token.email = profile.email;
-      if (profile?.name) token.name = profile.name;
+      if (profileName) token.name = profileName;
       if (profile?.email) {
         try {
           const res = await fetch(`${BACKEND_API_BASE}/auth/google-user`, {
@@ -80,7 +95,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             },
             body: JSON.stringify({
               email: profile.email.trim().toLowerCase(),
-              name: profile.name || "Student",
+              name: profileName || "Student",
             }),
           });
           if (res.ok) {
